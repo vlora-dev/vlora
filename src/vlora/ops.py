@@ -88,8 +88,9 @@ def reconstruct_from_subspace(components: Tensor, loadings: Tensor) -> Tensor:
 def gram_schmidt(basis: Tensor, new_vectors: Tensor) -> Tensor:
     """Orthogonalize new_vectors against an existing orthonormal basis.
 
-    Appends only those new directions that have non-trivial norm after
-    projection removal (threshold: 1e-6).
+    Uses QR factorization on the combined matrix for better numerical
+    stability and O(k*D) performance vs the naive O(k²*D) approach.
+    Appends only directions with non-trivial norm (threshold: 1e-6).
 
     Args:
         basis: (k, D) existing orthonormal basis.
@@ -99,18 +100,21 @@ def gram_schmidt(basis: Tensor, new_vectors: Tensor) -> Tensor:
         expanded_basis: (k + n, D) where n <= m new orthogonal directions
             were found.
     """
-    vectors = list(basis)
-
-    for v in new_vectors:
-        v = v.clone()
-        # Remove components along every existing basis vector
-        for b in vectors:
-            v = v - (v @ b) * b
-        norm = v.norm()
-        if norm > 1e-6:
-            vectors.append(v / norm)
-
-    return torch.stack(vectors)
+    k = basis.shape[0]
+    combined = torch.cat([basis, new_vectors], dim=0)  # (k+m, D)
+    # QR on the transpose: (D, k+m) → Q is (D, min(D, k+m))
+    Q, R = torch.linalg.qr(combined.T, mode="reduced")
+    # Q columns are the orthonormal basis, rows of Q.T are the vectors
+    all_vectors = Q.T  # (min(D, k+m), D)
+    # Keep original basis vectors plus any new ones with non-trivial norm.
+    # R's diagonal tells us which vectors were linearly independent.
+    diag = R.diag().abs()
+    # Always keep the first k (original basis), filter the rest
+    keep = list(range(k))
+    for i in range(k, len(diag)):
+        if diag[i] > 1e-6:
+            keep.append(i)
+    return all_vectors[keep]
 
 
 def incremental_svd_update(

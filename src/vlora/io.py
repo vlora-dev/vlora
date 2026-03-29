@@ -30,12 +30,18 @@ class LoRAWeights:
     rank: int
     metadata: dict = field(default_factory=dict)
 
+    def __repr__(self) -> str:
+        return f"LoRAWeights(rank={self.rank}, layers={len(self.layer_names)})"
+
 
 # Pattern to extract layer name + side from PEFT state dict keys.
-# Handles: base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
-#       or: model.layers.0.self_attn.q_proj.lora_A.weight
+# Handles single-adapter format:
+#   base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+#   model.layers.0.self_attn.q_proj.lora_A.weight
+# And multi-adapter format (PEFT >= 0.6):
+#   base_model.model.model.layers.0.self_attn.q_proj.lora_A.adapter_name.weight
 _LORA_KEY_RE = re.compile(
-    r"(?:base_model\.model\.)?(.+)\.(lora_[AB])\.(?:weight|default\.weight)"
+    r"(?:base_model\.model\.)?(.+)\.(lora_[AB])\.(?:\w+\.)?weight"
 )
 
 
@@ -184,7 +190,8 @@ def save_adapter(weights: LoRAWeights, path: str | Path) -> None:
     config.setdefault("r", weights.rank)
     config.setdefault("lora_alpha", weights.rank)  # alpha=rank → scaling=1.0
     config.setdefault("peft_type", "LORA")
-    config.setdefault("task_type", "CAUSAL_LM")
+    # Don't default task_type — it depends on the model architecture
+    # (CAUSAL_LM, SEQ_2_SEQ_LM, TOKEN_CLS, etc.). Let PEFT infer it.
     config.setdefault("bias", "none")
     config.setdefault("lora_dropout", 0.0)
     with open(path / "adapter_config.json", "w") as f:

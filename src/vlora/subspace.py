@@ -45,6 +45,10 @@ class TaskProjection:
     loadings_a: dict[str, Tensor]  # layer_name -> (k,)
     loadings_b: dict[str, Tensor]  # layer_name -> (k,)
 
+    def __repr__(self) -> str:
+        k = next(iter(self.loadings_a.values())).shape[0] if self.loadings_a else 0
+        return f"TaskProjection(task_id={self.task_id!r}, k={k}, layers={len(self.loadings_a)})"
+
 
 class SharedSubspace:
     """Shared low-rank subspace for LoRA adapters.
@@ -65,6 +69,10 @@ class SharedSubspace:
         tasks: dict[str, TaskProjection],
         rank: int,
         num_components: int,
+        shapes_a: dict[str, tuple[int, ...]] | None = None,
+        shapes_b: dict[str, tuple[int, ...]] | None = None,
+        adaptive_k: bool = False,
+        variance_threshold: float = 0.6,
     ):
         self.layer_names = layer_names
         self.components_a = components_a
@@ -76,6 +84,27 @@ class SharedSubspace:
         self.tasks = tasks
         self.rank = rank
         self.num_components = num_components
+        self.adaptive_k = adaptive_k
+        self.variance_threshold = variance_threshold
+        # Per-layer original matrix shapes for safe reconstruction.
+        # Derived from numel/rank when not provided (backwards compat).
+        if shapes_a is not None:
+            self.shapes_a = shapes_a
+            self.shapes_b = shapes_b or {}
+        else:
+            self.shapes_a = {}
+            self.shapes_b = {}
+            for layer in layer_names:
+                dim_a = components_a[layer].shape[1]
+                dim_b = components_b[layer].shape[1]
+                self.shapes_a[layer] = (rank, dim_a // rank)
+                self.shapes_b[layer] = (dim_b // rank, rank)
+
+    def __repr__(self) -> str:
+        return (
+            f"SharedSubspace(layers={len(self.layer_names)}, k={self.num_components}, "
+            f"rank={self.rank}, tasks={len(self.tasks)})"
+        )
 
     @classmethod
     def from_adapters(
@@ -197,6 +226,10 @@ class SharedSubspace:
             resolved_k, len(layer_names), len(tasks), rank,
         )
 
+        # Record original matrix shapes from the first adapter
+        shapes_a = {l: tuple(adapters[0].lora_a[l].shape) for l in layer_names}
+        shapes_b = {l: tuple(adapters[0].lora_b[l].shape) for l in layer_names}
+
         return cls(
             layer_names=layer_names,
             components_a=components_a,
@@ -208,6 +241,10 @@ class SharedSubspace:
             tasks=tasks,
             rank=rank,
             num_components=resolved_k,
+            shapes_a=shapes_a,
+            shapes_b=shapes_b,
+            adaptive_k=adaptive_k,
+            variance_threshold=variance_threshold,
         )
 
     def project(self, adapter: LoRAWeights, task_id: str) -> TaskProjection:
@@ -246,12 +283,13 @@ class SharedSubspace:
                 self.components_b[layer], proj.loadings_b[layer]
             ) + self.means_b[layer]
 
-            # Recover original matrix shapes from the adapter's rank
-            # A: (rank, in_features), B: (out_features, rank)
-            ref_a_shape = (self.rank, flat_a.numel() // self.rank)
-            ref_b_shape = (flat_b.numel() // self.rank, self.rank)
-            lora_a[layer] = flat_a.reshape(ref_a_shape)
-            lora_b[layer] = flat_b.reshape(ref_b_shape)
+            # Use stored shapes if available, else derive from rank
+            if layer in self.shapes_a:
+                lora_a[layer] = flat_a.reshape(self.shapes_a[layer])
+                lora_b[layer] = flat_b.reshape(self.shapes_b[layer])
+            else:
+                lora_a[layer] = flat_a.reshape(self.rank, -1)
+                lora_b[layer] = flat_b.reshape(-1, self.rank)
 
         return LoRAWeights(
             layer_names=self.layer_names,
@@ -284,11 +322,13 @@ class SharedSubspace:
         all_adapters.append(new_adapter)
         all_ids.append(new_task_id)
 
-        # Rebuild subspace from scratch
+        # Rebuild subspace from scratch, preserving adaptive_k settings
         new_sub = SharedSubspace.from_adapters(
             all_adapters,
             task_ids=all_ids,
-            num_components=self.num_components,
+            num_components=None if self.adaptive_k else self.num_components,
+            adaptive_k=self.adaptive_k,
+            variance_threshold=self.variance_threshold,
         )
 
         # Update self in-place
@@ -301,6 +341,8 @@ class SharedSubspace:
         self.means_b = new_sub.means_b
         self.tasks = new_sub.tasks
         self.num_components = new_sub.num_components
+        self.shapes_a = new_sub.shapes_a
+        self.shapes_b = new_sub.shapes_b
 
     def absorb_incremental(self, new_adapter: LoRAWeights, new_task_id: str) -> None:
         """Absorb a new adapter incrementally without full SVD recompute.
@@ -695,6 +737,10 @@ class SharedSubspace:
             "task_filenames": tid_to_filename,
             "rank": self.rank,
             "num_components": self.num_components,
+            "shapes_a": {l: list(s) for l, s in self.shapes_a.items()},
+            "shapes_b": {l: list(s) for l, s in self.shapes_b.items()},
+            "adaptive_k": self.adaptive_k,
+            "variance_threshold": self.variance_threshold,
         }
         with open(path / "subspace_meta.json", "w") as f:
             json.dump(meta, f, indent=2)
@@ -715,6 +761,12 @@ class SharedSubspace:
         num_components = meta["num_components"]
         # Support both old format (no mapping) and new format
         tid_to_filename = meta.get("task_filenames", {})
+        shapes_a_raw = meta.get("shapes_a")
+        shapes_b_raw = meta.get("shapes_b")
+        shapes_a = {l: tuple(s) for l, s in shapes_a_raw.items()} if shapes_a_raw else None
+        shapes_b = {l: tuple(s) for l, s in shapes_b_raw.items()} if shapes_b_raw else None
+        adaptive_k = meta.get("adaptive_k", False)
+        variance_threshold = meta.get("variance_threshold", 0.6)
 
         tensors = load_file(str(path / "subspace.safetensors"))
         components_a = {l: tensors[f"{l}.components_a"] for l in layer_names}
@@ -745,4 +797,8 @@ class SharedSubspace:
             tasks=tasks,
             rank=rank,
             num_components=num_components,
+            shapes_a=shapes_a,
+            shapes_b=shapes_b,
+            adaptive_k=adaptive_k,
+            variance_threshold=variance_threshold,
         )

@@ -134,16 +134,21 @@ class VLoRAModel(nn.Module):
         self._hooks.clear()
 
     def _make_lora_hook(self, delta: Tensor):
-        """Create a forward hook that adds LoRA delta to the output."""
+        """Create a forward hook that adds LoRA delta to the output.
+
+        Wrapped in torch.no_grad() since the delta is a pre-computed
+        constant — no gradients should flow through inference hooks.
+        (Differentiable hooks for training are handled separately by
+        VLoRACallback.)
+        """
         scaling = self.scaling
         compute_dtype = self.compute_dtype
 
         def hook(module: nn.Module, input: Any, output: Tensor) -> Tensor:
             x = input[0] if isinstance(input, tuple) else input
-            # Use explicit compute_dtype when set (important for QLoRA
-            # where base model runs in BF16 but deltas are float32).
-            dtype = compute_dtype if compute_dtype is not None else x.dtype
-            lora_out = x.to(dtype) @ delta.T.to(x.device, dtype)
+            with torch.no_grad():
+                dtype = compute_dtype if compute_dtype is not None else x.dtype
+                lora_out = x.to(dtype) @ delta.T.to(x.device, dtype)
             return output + scaling * lora_out.to(output.dtype)
 
         return hook
