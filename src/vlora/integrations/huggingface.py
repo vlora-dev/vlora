@@ -1,5 +1,9 @@
 """HuggingFace Trainer integration — VLoRACallback for training-in-subspace.
 
+Registers differentiable forward hooks on the base model so that the
+Trainer's backward pass flows gradients to subspace loadings. A separate
+optimizer steps the loadings each training step.
+
 Usage with HuggingFace Trainer:
     from vlora import SharedSubspace, orthogonal_init
     from vlora.integrations.huggingface import VLoRACallback
@@ -24,8 +28,10 @@ import logging
 from typing import Any
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
+from vlora.ops import reconstruct_from_subspace
 from vlora.subspace import SharedSubspace
 from vlora.training import SubspaceTrainer
 
@@ -53,9 +59,13 @@ if HAS_TRANSFORMERS:
     class VLoRACallback(TrainerCallback):
         """HuggingFace Trainer callback for training-in-subspace.
 
-        Intercepts the training loop to optimize subspace loadings instead of
-        full model parameters. Logs adapter-specific metrics (loadings norm,
-        reconstruction error) to the Trainer's log history.
+        Registers differentiable forward hooks on the base model so the
+        Trainer's backward pass produces gradients on the subspace loadings.
+        A separate optimizer steps the loadings each training step.
+
+        The hooks compute: ``output += (x @ (B @ A).T)`` where A and B are
+        differentiably reconstructed from the trainable loadings, allowing
+        gradients to flow from the loss through to the loading parameters.
 
         Args:
             subspace: Shared subspace (task must already exist).
@@ -83,6 +93,35 @@ if HAS_TRANSFORMERS:
             self.log_every = log_every
             self.save_on_end = save_on_end
             self._trainer: SubspaceTrainer | None = None
+            self._fwd_hooks: list = []
+
+        def _make_differentiable_hook(self, layer_name: str):
+            """Create a forward hook that reconstructs LoRA delta from loadings.
+
+            The reconstruction is differentiable — gradients flow from the
+            loss through the hook back to the loadings parameters.
+            """
+            params = self._trainer.params
+            la = params[f"{layer_name}.loadings_a"]
+            lb = params[f"{layer_name}.loadings_b"]
+            comp_a = self.subspace.components_a[layer_name]
+            comp_b = self.subspace.components_b[layer_name]
+            mean_a = self.subspace.means_a[layer_name]
+            mean_b = self.subspace.means_b[layer_name]
+            rank = self.subspace.rank
+
+            def hook(module: nn.Module, input: Any, output: Tensor) -> Tensor:
+                x = input[0] if isinstance(input, tuple) else input
+                # Differentiable reconstruction: loadings → flat → matrix
+                flat_a = reconstruct_from_subspace(comp_a, la) + mean_a
+                flat_b = reconstruct_from_subspace(comp_b, lb) + mean_b
+                A = flat_a.reshape(rank, -1)
+                B = flat_b.reshape(-1, rank)
+                delta = B @ A
+                lora_out = x.to(delta.dtype) @ delta.T.to(x.device)
+                return output + lora_out.to(output.dtype)
+
+            return hook
 
         def on_train_begin(
             self,
@@ -97,11 +136,23 @@ if HAS_TRANSFORMERS:
                 lr=self.lr,
                 num_expand=self.num_expand,
             )
+
+            # Register differentiable hooks on the base model
+            model = kwargs.get("model")
+            if model is not None:
+                for name, module in model.named_modules():
+                    if name in self.subspace.layer_names and isinstance(module, nn.Linear):
+                        hook = module.register_forward_hook(
+                            self._make_differentiable_hook(name)
+                        )
+                        self._fwd_hooks.append(hook)
+
             logger.info(
-                "VLoRACallback: training '%s' with %d params (lr=%.1e)",
+                "VLoRACallback: training '%s' with %d params (lr=%.1e), %d hooks",
                 self.task_id,
                 self._trainer.num_trainable_params,
                 self.lr,
+                len(self._fwd_hooks),
             )
 
         def on_step_end(
@@ -114,9 +165,16 @@ if HAS_TRANSFORMERS:
             if self._trainer is None:
                 return
 
+            # Step the loadings optimizer. Gradients accumulated during the
+            # Trainer's backward pass via our differentiable hooks. Our
+            # loadings are standalone tensors (not model.parameters()), so
+            # their gradients survive the Trainer's model.zero_grad().
+            self._trainer.optimizer.step()
+            self._trainer.optimizer.zero_grad()
+            self._trainer._step_count += 1
+
             step = state.global_step
             if step > 0 and step % self.log_every == 0:
-                # Log loadings norm as a proxy for adapter magnitude
                 total_norm = 0.0
                 for p in self._trainer.params.values():
                     total_norm += p.data.norm().item() ** 2
@@ -143,6 +201,11 @@ if HAS_TRANSFORMERS:
             control: TrainerControl,
             **kwargs: Any,
         ):
+            # Remove hooks
+            for h in self._fwd_hooks:
+                h.remove()
+            self._fwd_hooks.clear()
+
             if self._trainer is not None and self.save_on_end:
                 self._trainer.write_back()
                 logger.info(
