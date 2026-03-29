@@ -128,6 +128,120 @@ class TestSaveLoad:
             assert torch.allclose(loaded.components_b[l], sub.components_b[l])
 
 
+class TestNonSquareLoRA:
+    """Test with in_features != out_features (realistic LoRA shapes)."""
+
+    def test_asymmetric_shapes_roundtrip(self):
+        layers = ["layer.0.q_proj"]
+        rank = 4
+        in_features = 512
+        out_features = 128
+        adapters = []
+        for _ in range(3):
+            lora_a = {layers[0]: torch.randn(rank, in_features)}
+            lora_b = {layers[0]: torch.randn(out_features, rank)}
+            adapters.append(LoRAWeights(layer_names=layers, lora_a=lora_a, lora_b=lora_b, rank=rank))
+
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        recon = sub.reconstruct("task_0")
+        assert recon.lora_a[layers[0]].shape == (rank, in_features)
+        assert recon.lora_b[layers[0]].shape == (out_features, rank)
+
+    def test_shapes_stored_correctly(self):
+        layers = ["layer.0.q_proj"]
+        rank = 8
+        in_features = 1024
+        out_features = 256
+        adapters = []
+        for _ in range(3):
+            lora_a = {layers[0]: torch.randn(rank, in_features)}
+            lora_b = {layers[0]: torch.randn(out_features, rank)}
+            adapters.append(LoRAWeights(layer_names=layers, lora_a=lora_a, lora_b=lora_b, rank=rank))
+
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        assert sub.shapes_a[layers[0]] == (rank, in_features)
+        assert sub.shapes_b[layers[0]] == (out_features, rank)
+
+    def test_shapes_survive_save_load(self, tmp_path):
+        layers = ["layer.0.q_proj"]
+        rank = 4
+        in_features = 512
+        out_features = 128
+        adapters = []
+        for _ in range(3):
+            lora_a = {layers[0]: torch.randn(rank, in_features)}
+            lora_b = {layers[0]: torch.randn(out_features, rank)}
+            adapters.append(LoRAWeights(layer_names=layers, lora_a=lora_a, lora_b=lora_b, rank=rank))
+
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        sub.save(tmp_path / "subspace")
+        loaded = SharedSubspace.load(tmp_path / "subspace")
+
+        recon = loaded.reconstruct("task_0")
+        assert recon.lora_a[layers[0]].shape == (rank, in_features)
+        assert recon.lora_b[layers[0]].shape == (out_features, rank)
+
+
+class TestSpecialCharTaskIds:
+    """Test task IDs with filesystem-unsafe characters."""
+
+    def test_save_load_with_slashes(self, tmp_path):
+        adapters, layers = _make_adapters(2)
+        ids = ["model/v1", "model/v2"]
+        sub = SharedSubspace.from_adapters(adapters, task_ids=ids, num_components=2)
+        sub.save(tmp_path / "subspace")
+        loaded = SharedSubspace.load(tmp_path / "subspace")
+        assert set(loaded.tasks.keys()) == set(ids)
+
+    def test_save_load_with_colons_and_spaces(self, tmp_path):
+        adapters, _ = _make_adapters(2)
+        ids = ["task:v2", "my task"]
+        sub = SharedSubspace.from_adapters(adapters, task_ids=ids, num_components=2)
+        sub.save(tmp_path / "subspace")
+        loaded = SharedSubspace.load(tmp_path / "subspace")
+        assert set(loaded.tasks.keys()) == set(ids)
+        # Verify reconstruction works
+        recon = loaded.reconstruct("task:v2")
+        assert recon.rank == sub.rank
+
+
+class TestRepr:
+    def test_subspace_repr(self):
+        adapters, _ = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        r = repr(sub)
+        assert "SharedSubspace" in r
+        assert "k=2" in r
+        assert "tasks=3" in r
+
+    def test_task_projection_repr(self):
+        adapters, _ = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        proj = sub.tasks["task_0"]
+        r = repr(proj)
+        assert "TaskProjection" in r
+        assert "task_0" in r
+
+    def test_lora_weights_repr(self):
+        adapters, _ = _make_adapters(1)
+        r = repr(adapters[0])
+        assert "LoRAWeights" in r
+        assert "rank=4" in r
+
+
+class TestAdaptiveKPreserved:
+    def test_absorb_preserves_adaptive_k(self):
+        adapters, _ = _make_adapters(5)
+        sub = SharedSubspace.from_adapters(adapters, adaptive_k=True, variance_threshold=0.8)
+        assert sub.adaptive_k is True
+        assert sub.variance_threshold == 0.8
+
+        new = _make_adapters(1)[0][0]
+        sub.absorb(new, "new_task")
+        assert sub.adaptive_k is True
+        assert sub.variance_threshold == 0.8
+
+
 class TestTrainableParams:
     def test_returns_params_with_grad(self):
         adapters, layers = _make_adapters(3)

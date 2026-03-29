@@ -136,6 +136,50 @@ class TestAbsorbIncremental:
         assert "new" in sub_inc.tasks
 
 
+class TestAbsorbIncrementalAccuracy:
+    """Compare absorb_incremental quality against full from_adapters."""
+
+    def test_incremental_reconstruction_bounded(self):
+        """Existing tasks should reconstruct reasonably after incremental absorb."""
+        torch.manual_seed(42)
+        adapters, layers = _make_adapters(5, rank=4, dim=64)
+        new_adapter = _make_adapters(1, rank=4, dim=64)[0][0]
+
+        # Full SVD baseline
+        sub_full = SharedSubspace.from_adapters(adapters, num_components=3)
+        sub_full.absorb(new_adapter, "new_task")
+        recon_full = sub_full.reconstruct("task_0")
+
+        # Incremental
+        sub_inc = SharedSubspace.from_adapters(adapters, num_components=3)
+        sub_inc.absorb_incremental(new_adapter, "new_task")
+        recon_inc = sub_inc.reconstruct("task_0")
+
+        # Incremental reconstruction should be in the right ballpark
+        for l in layers:
+            full_a = recon_full.lora_a[l]
+            inc_a = recon_inc.lora_a[l]
+            # Relative error < 50% (incremental is approximate)
+            rel_err = (full_a - inc_a).norm() / full_a.norm().clamp(min=1e-6)
+            assert rel_err < 0.5, f"Layer {l} A-side relative error {rel_err:.3f} too high"
+
+    def test_new_task_reconstructs_well(self):
+        """The newly absorbed task should reconstruct with reasonable fidelity."""
+        torch.manual_seed(42)
+        adapters, layers = _make_adapters(5, rank=4, dim=64)
+        new_adapter = _make_adapters(1, rank=4, dim=64)[0][0]
+
+        sub = SharedSubspace.from_adapters(adapters, num_components=3)
+        sub.absorb_incremental(new_adapter, "new_task")
+        recon = sub.reconstruct("new_task")
+
+        for l in layers:
+            original = new_adapter.lora_a[l]
+            reconstructed = recon.lora_a[l]
+            rel_err = (original - reconstructed).norm() / original.norm().clamp(min=1e-6)
+            assert rel_err < 1.0
+
+
 class TestFromAdaptersStreaming:
     def test_streaming_builds_subspace(self, tmp_path):
         adapters, layers = _make_adapters(4)

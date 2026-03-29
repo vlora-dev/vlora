@@ -242,7 +242,12 @@ def select_num_components(singular_values: Tensor, threshold: float = 0.6) -> in
     return above[0].item() + 1
 
 
-def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
+def nf4_quantize_dequantize(
+    tensor: Tensor,
+    block_size: int = 64,
+    double_quant: bool = False,
+    double_quant_block_size: int = 256,
+) -> Tensor:
     """Simulate NF4 quantization by snapping values to NF4 levels.
 
     Applies per-block absmax normalization, maps each value to the
@@ -259,6 +264,12 @@ def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
         tensor: Tensor to quantize.
         block_size: Number of elements per quantization block.
             Smaller blocks = finer granularity = less error. Default 64.
+        double_quant: If True, apply double quantization — quantize the
+            per-block absmax scales to FP8, reducing scale overhead from
+            0.5 bits/param to ~0.127 bits/param. Introduces a small
+            additional precision loss.
+        double_quant_block_size: Number of block-scales per second-level
+            group for double quantization. Default 256.
 
     Returns:
         Dequantized tensor with same shape and dtype as input.
@@ -279,13 +290,30 @@ def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
 
     # Per-block absmax normalization → values in [-1, 1]
     absmax = blocks.abs().amax(dim=1, keepdim=True).clamp(min=1e-10)
+
+    if double_quant:
+        # Quantize the absmax scales to FP8 (simulated via round-trip
+        # to reduced precision). Group scales into second-level blocks.
+        absmax_flat = absmax.flatten()
+        n_scales = absmax_flat.numel()
+        dq_bs = double_quant_block_size
+        pad_scales = (dq_bs - n_scales % dq_bs) % dq_bs
+        if pad_scales:
+            absmax_flat = torch.cat([absmax_flat, torch.ones(pad_scales, device=absmax_flat.device)])
+        scale_blocks = absmax_flat.reshape(-1, dq_bs)
+        # Second-level absmax + FP8 simulation (127 levels for E4M3)
+        scale_absmax = scale_blocks.abs().amax(dim=1, keepdim=True).clamp(min=1e-10)
+        qmax_fp8 = 127.0
+        scale_normalized = scale_blocks / scale_absmax
+        scale_quantized = (scale_normalized * qmax_fp8).round().clamp(-qmax_fp8, qmax_fp8) / qmax_fp8
+        absmax_dq = (scale_quantized * scale_absmax).flatten()[:n_scales]
+        absmax = absmax_dq.reshape(-1, 1)
+
     normalized = blocks / absmax
 
     # Snap to nearest NF4 level via binary search (memory-efficient).
-    # Midpoints between adjacent NF4 levels serve as bucket boundaries.
     table = NF4_QUANT_TABLE.to(device=normalized.device, dtype=normalized.dtype)
     midpoints = (table[:-1] + table[1:]) / 2  # 15 boundaries
-    # bucketize returns the index of the bucket each value falls into
     indices = torch.bucketize(normalized, midpoints)
     quantized_normalized = table[indices]
 

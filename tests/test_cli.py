@@ -172,6 +172,63 @@ class TestMerge:
         assert result.exit_code == 0, result.output
 
 
+class TestValidate:
+    def test_validate_healthy_subspace(self, tmp_path):
+        dirs = _make_correlated_adapter_dirs(tmp_path, n=3)
+        sub_path = tmp_path / "subspace"
+
+        runner = CliRunner()
+        args = [str(d) for d in dirs] + ["-o", str(sub_path), "-k", "2"]
+        runner.invoke(cli, ["compress"] + args)
+
+        result = runner.invoke(cli, ["validate", str(sub_path)])
+        assert result.exit_code == 0, result.output
+        assert "All checks passed" in result.output
+
+
+class TestDiff:
+    def test_diff_two_tasks(self, tmp_path):
+        dirs = _make_correlated_adapter_dirs(tmp_path, n=3)
+        sub_path = tmp_path / "subspace"
+
+        runner = CliRunner()
+        args = [str(d) for d in dirs] + ["-o", str(sub_path), "-k", "2"]
+        runner.invoke(cli, ["compress"] + args)
+
+        result = runner.invoke(cli, ["diff", str(sub_path), "adapter_0", "adapter_1"])
+        assert result.exit_code == 0, result.output
+        assert "L2 Dist" in result.output
+        assert "Cosine" in result.output
+
+    def test_diff_unknown_task_fails(self, tmp_path):
+        dirs = _make_correlated_adapter_dirs(tmp_path, n=3)
+        sub_path = tmp_path / "subspace"
+
+        runner = CliRunner()
+        args = [str(d) for d in dirs] + ["-o", str(sub_path), "-k", "2"]
+        runner.invoke(cli, ["compress"] + args)
+
+        result = runner.invoke(cli, ["diff", str(sub_path), "adapter_0", "nonexistent"])
+        assert result.exit_code != 0
+        assert "Unknown task" in result.output
+
+
+class TestBenchmark:
+    def test_benchmark_runs(self, tmp_path):
+        dirs = _make_correlated_adapter_dirs(tmp_path, n=3)
+        sub_path = tmp_path / "subspace"
+
+        runner = CliRunner()
+        args = [str(d) for d in dirs] + ["-o", str(sub_path), "-k", "2"]
+        runner.invoke(cli, ["compress"] + args)
+
+        result = runner.invoke(cli, ["benchmark", str(sub_path)])
+        assert result.exit_code == 0, result.output
+        assert "reconstruct" in result.output
+        assert "project" in result.output
+        assert "Compression ratio" in result.output
+
+
 class TestAnalyze:
     def test_analyze_shows_similarity(self, tmp_path):
         dirs = _make_correlated_adapter_dirs(tmp_path, n=3)

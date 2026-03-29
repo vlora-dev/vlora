@@ -506,6 +506,7 @@ class SharedSubspace:
         method: Literal["symmetric", "nf4"] = "symmetric",
         block_size: int = 64,
         quantize_loadings: bool = False,
+        double_quant: bool = False,
     ) -> SharedSubspace:
         """Quantize components (and optionally loadings) to reduce memory.
 
@@ -531,6 +532,9 @@ class SharedSubspace:
                 (not just components). Loadings from dot products of
                 normal-ish weights tend to be approximately normal, so
                 NF4 is especially effective here.
+            double_quant: If True, also quantize the per-block NF4 scales
+                to FP8 (QLoRA double quantization). Reduces scale overhead
+                from 0.5 to ~0.127 bits/param. Only applies to NF4.
 
         Returns:
             self (modified in-place).
@@ -540,7 +544,7 @@ class SharedSubspace:
                 raise ValueError(f"bits must be 4 or 8, got {bits}")
             self._quantize_symmetric(bits, quantize_loadings)
         elif method == "nf4":
-            self._quantize_nf4(block_size, quantize_loadings)
+            self._quantize_nf4(block_size, quantize_loadings, double_quant)
         else:
             raise ValueError(f"method must be 'symmetric' or 'nf4', got {method!r}")
 
@@ -571,19 +575,19 @@ class SharedSubspace:
                         quantized = (t / scale).round().clamp(-qmax, qmax)
                         loads[layer] = (quantized * scale).to(t.dtype)
 
-    def _quantize_nf4(self, block_size: int, quantize_loadings: bool) -> None:
+    def _quantize_nf4(self, block_size: int, quantize_loadings: bool, double_quant: bool = False) -> None:
         """NF4 per-block quantization (QLoRA-style)."""
         for layer in self.layer_names:
             for attr in ["components_a", "components_b"]:
                 d = getattr(self, attr)
-                d[layer] = nf4_quantize_dequantize(d[layer], block_size)
+                d[layer] = nf4_quantize_dequantize(d[layer], block_size, double_quant=double_quant)
 
         if quantize_loadings:
             for proj in self.tasks.values():
                 for loads in [proj.loadings_a, proj.loadings_b]:
                     for layer in self.layer_names:
                         loads[layer] = nf4_quantize_dequantize(
-                            loads[layer], block_size
+                            loads[layer], block_size, double_quant=double_quant
                         )
 
     def compression_stats(self) -> dict:
@@ -631,6 +635,52 @@ class SharedSubspace:
             "num_tasks": n_tasks,
             "num_layers": len(self.layer_names),
         }
+
+    def full_stack_compression(
+        self,
+        base_model_params: int | None = None,
+        base_model_bits: int = 16,
+        quantized_bits: int = 4,
+    ) -> dict:
+        """Compression stats including base model quantization.
+
+        Reports combined savings when using a quantized base model
+        (e.g. QLoRA NF4) alongside vLoRA adapter compression.
+
+        Args:
+            base_model_params: Total base model parameters. If None,
+                only adapter compression is reported.
+            base_model_bits: Original precision bits (16 for FP16/BF16).
+            quantized_bits: Quantized precision bits (4 for NF4).
+
+        Returns:
+            Dict with adapter_compression, base_compression (if applicable),
+            and combined totals in bytes.
+        """
+        adapter_stats = self.compression_stats()
+        result = {"adapter": adapter_stats}
+
+        # Adapter memory: params × 4 bytes (float32)
+        result["adapter_bytes_compressed"] = adapter_stats["total_params_compressed"] * 4
+        result["adapter_bytes_original"] = adapter_stats["total_params_original"] * 4
+
+        if base_model_params is not None:
+            base_original = base_model_params * (base_model_bits / 8)
+            base_quantized = base_model_params * (quantized_bits / 8)
+            result["base_model"] = {
+                "params": base_model_params,
+                "original_bytes": base_original,
+                "quantized_bytes": base_quantized,
+                "compression_ratio": base_original / base_quantized if base_quantized > 0 else 0,
+            }
+            result["total_original_bytes"] = base_original + result["adapter_bytes_original"]
+            result["total_compressed_bytes"] = base_quantized + result["adapter_bytes_compressed"]
+            result["total_compression_ratio"] = (
+                result["total_original_bytes"] / result["total_compressed_bytes"]
+                if result["total_compressed_bytes"] > 0 else 0
+            )
+
+        return result
 
     def get_trainable_params(
         self, task_id: str, num_expand: int = 0
