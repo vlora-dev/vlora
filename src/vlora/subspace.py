@@ -149,6 +149,8 @@ class SharedSubspace:
             ]:
                 data = stacked[layer]
                 comps, svals, mean = compute_svd(data, num_components=None, center=True)
+                check_tensor_health(comps, f"{layer}.components_{side.lower()}")
+                check_tensor_health(mean, f"{layer}.mean_{side.lower()}")
 
                 if adaptive_k:
                     # Per-layer: each layer/side gets its own k
@@ -265,6 +267,12 @@ class SharedSubspace:
         reruns SVD to produce an updated basis.
         """
         check_adapter_matches_subspace(new_adapter, self, "absorb")
+        if new_task_id in self.tasks:
+            import warnings
+            warnings.warn(
+                f"Task '{new_task_id}' already exists and will be overwritten by absorb.",
+                stacklevel=2,
+            )
         logger.info("Absorbing adapter '%s' (full SVD recompute, %d existing tasks)", new_task_id, len(self.tasks))
         # Reconstruct all existing tasks as full adapters
         all_adapters = []
@@ -308,6 +316,12 @@ class SharedSubspace:
         approximation trade-off.
         """
         check_adapter_matches_subspace(new_adapter, self, "absorb_incremental")
+        if new_task_id in self.tasks:
+            import warnings
+            warnings.warn(
+                f"Task '{new_task_id}' already exists and will be overwritten by absorb_incremental.",
+                stacklevel=2,
+            )
         logger.debug("Absorbing adapter '%s' incrementally", new_task_id)
         loadings_a: dict[str, Tensor] = {}
         loadings_b: dict[str, Tensor] = {}
@@ -390,6 +404,11 @@ class SharedSubspace:
         paths = [Path(p) for p in adapter_paths]
         if task_ids is None:
             task_ids = [p.name for p in paths]
+        if len(task_ids) != len(paths):
+            raise ValueError(
+                f"task_ids length ({len(task_ids)}) must match "
+                f"adapter_paths length ({len(paths)})"
+            )
 
         # Initialize from first adapter(s) — use first two if available
         # so SVD has enough samples to find >1 component
@@ -633,8 +652,16 @@ class SharedSubspace:
 
         return params
 
+    @staticmethod
+    def _safe_filename(task_id: str) -> str:
+        """Convert a task ID to a filesystem-safe filename component."""
+        import re
+        return re.sub(r'[^\w\-.]', '_', task_id)
+
     def save(self, path: str | Path) -> None:
         """Serialize the subspace to disk."""
+        import json
+
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
@@ -650,19 +677,22 @@ class SharedSubspace:
 
         save_file(tensors, str(path / "subspace.safetensors"))
 
-        # Save per-task loadings
+        # Save per-task loadings (with sanitized filenames)
+        tid_to_filename: dict[str, str] = {}
         for tid, proj in self.tasks.items():
+            safe_name = self._safe_filename(tid)
+            tid_to_filename[tid] = safe_name
             task_tensors = {}
             for layer in self.layer_names:
                 task_tensors[f"{layer}.loadings_a"] = proj.loadings_a[layer].contiguous()
                 task_tensors[f"{layer}.loadings_b"] = proj.loadings_b[layer].contiguous()
-            save_file(task_tensors, str(path / f"task_{tid}.safetensors"))
+            save_file(task_tensors, str(path / f"task_{safe_name}.safetensors"))
 
-        # Save metadata
-        import json
+        # Save metadata (includes filename mapping for safe round-trip)
         meta = {
             "layer_names": self.layer_names,
             "task_ids": list(self.tasks.keys()),
+            "task_filenames": tid_to_filename,
             "rank": self.rank,
             "num_components": self.num_components,
         }
@@ -683,6 +713,8 @@ class SharedSubspace:
         task_ids = meta["task_ids"]
         rank = meta["rank"]
         num_components = meta["num_components"]
+        # Support both old format (no mapping) and new format
+        tid_to_filename = meta.get("task_filenames", {})
 
         tensors = load_file(str(path / "subspace.safetensors"))
         components_a = {l: tensors[f"{l}.components_a"] for l in layer_names}
@@ -694,7 +726,8 @@ class SharedSubspace:
 
         tasks = {}
         for tid in task_ids:
-            task_tensors = load_file(str(path / f"task_{tid}.safetensors"))
+            safe_name = tid_to_filename.get(tid, tid)
+            task_tensors = load_file(str(path / f"task_{safe_name}.safetensors"))
             loadings_a = {l: task_tensors[f"{l}.loadings_a"] for l in layer_names}
             loadings_b = {l: task_tensors[f"{l}.loadings_b"] for l in layer_names}
             tasks[tid] = TaskProjection(

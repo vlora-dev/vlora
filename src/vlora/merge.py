@@ -141,9 +141,9 @@ def ties_merge(
             weighted = stacked * w
             # Zero out values with wrong sign
             weighted = weighted * mask.float()
-            # Sum and normalize by number of contributors (avoid division by zero)
+            # Average over contributors that match elected sign
             contributor_count = mask.float().sum(dim=0).clamp(min=1)
-            merged = weighted.sum(dim=0) * (n / contributor_count)
+            merged = weighted.sum(dim=0) / contributor_count
 
             out_dict[layer] = merged
 

@@ -5,7 +5,7 @@ share a common low-rank subspace. Instead of storing N separate adapters,
 maintain one shared basis and per-task coefficient vectors.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 
 from vlora.io import LoRAWeights, load_adapter, load_adapter_from_hub, save_adapter
 from vlora.ops import (

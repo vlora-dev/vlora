@@ -246,6 +246,9 @@ def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
     The returned tensor is the same dtype as input but only contains
     values representable in NF4 format.
 
+    Uses ``torch.bucketize`` (binary search) for O(N log 16) lookup
+    instead of broadcasting all 16 distances, keeping memory O(N).
+
     Based on QLoRA (Dettmers et al., 2023, arXiv:2305.14314).
 
     Args:
@@ -274,11 +277,12 @@ def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
     absmax = blocks.abs().amax(dim=1, keepdim=True).clamp(min=1e-10)
     normalized = blocks / absmax
 
-    # Snap each value to nearest NF4 level
+    # Snap to nearest NF4 level via binary search (memory-efficient).
+    # Midpoints between adjacent NF4 levels serve as bucket boundaries.
     table = NF4_QUANT_TABLE.to(device=normalized.device, dtype=normalized.dtype)
-    # (num_blocks, block_size, 1) vs (1, 1, 16) → distances (num_blocks, block_size, 16)
-    distances = (normalized.unsqueeze(-1) - table).abs()
-    indices = distances.argmin(dim=-1)
+    midpoints = (table[:-1] + table[1:]) / 2  # 15 boundaries
+    # bucketize returns the index of the bucket each value falls into
+    indices = torch.bucketize(normalized, midpoints)
     quantized_normalized = table[indices]
 
     # Dequantize: scale back by absmax

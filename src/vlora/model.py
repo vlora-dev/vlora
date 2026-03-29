@@ -80,6 +80,12 @@ class VLoRAModel(nn.Module):
         self._active_task: str | None = None
         self._cached_deltas: dict[str, Tensor] | None = None
         self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        # Cache module handles once to avoid O(M) scan on every task switch
+        self._target_modules: dict[str, nn.Module] = {
+            name: module
+            for name, module in self.base_model.named_modules()
+            if name in self.subspace.layer_names and _is_linear_layer(module)
+        }
         self._qlora_info = self._detect_quantization()
 
     def set_task(self, task_id: str) -> None:
@@ -113,8 +119,8 @@ class VLoRAModel(nn.Module):
         if self._cached_deltas is None:
             return
 
-        for name, module in self.base_model.named_modules():
-            if name in self._cached_deltas and _is_linear_layer(module):
+        for name, module in self._target_modules.items():
+            if name in self._cached_deltas:
                 delta = self._cached_deltas[name]
                 hook = module.register_forward_hook(
                     self._make_lora_hook(delta)
@@ -174,12 +180,12 @@ class VLoRAModel(nn.Module):
             "quantized": False,
             "method": None,
             "num_quantized_layers": 0,
-            "num_target_layers": 0,
+            "num_target_layers": len(self._target_modules),
         }
         try:
             import bitsandbytes as bnb
 
-            for name, module in self.base_model.named_modules():
+            for module in self._target_modules.values():
                 if isinstance(module, bnb.nn.Linear4bit):
                     info["quantized"] = True
                     info["method"] = info["method"] or "nf4"
@@ -190,11 +196,6 @@ class VLoRAModel(nn.Module):
                     info["num_quantized_layers"] += 1
         except ImportError:
             pass
-
-        # Count how many subspace layers match modules in the base model
-        for name, module in self.base_model.named_modules():
-            if name in self.subspace.layer_names and _is_linear_layer(module):
-                info["num_target_layers"] += 1
 
         return info
 
