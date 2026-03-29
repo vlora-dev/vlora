@@ -12,11 +12,31 @@ from vlora._validate import check_task_exists
 from vlora.subspace import SharedSubspace
 
 
+def _is_linear_layer(module: nn.Module) -> bool:
+    """Check if a module is a linear layer, including quantized variants.
+
+    Handles standard nn.Linear and bitsandbytes quantized layers
+    (Linear4bit, Linear8bitLt) which are used by QLoRA.
+    """
+    if isinstance(module, nn.Linear):
+        return True
+    # bitsandbytes quantized layers inherit from nn.Linear, so the
+    # check above covers them. This fallback handles non-standard
+    # quantization libraries whose linear layers don't inherit nn.Linear.
+    cls_name = type(module).__name__
+    return cls_name in ("Linear4bit", "Linear8bitLt", "LinearNF4")
+
+
 class VLoRAModel(nn.Module):
     """Wraps a base model with a shared subspace for multi-task LoRA inference.
 
     Reconstructs task-specific LoRA deltas on demand and applies them to
     the base model's linear layers during forward pass.
+
+    Supports both standard and QLoRA-quantized base models. When using a
+    quantized model (e.g. loaded with ``load_in_4bit=True``), set
+    ``compute_dtype`` to match the model's compute precision (typically
+    ``torch.bfloat16``).
 
     Usage:
         subspace = SharedSubspace.load("shared_subspace/")
@@ -28,6 +48,13 @@ class VLoRAModel(nn.Module):
 
         model.set_task("task_1")  # switches adapter, cached if same task
         output = model(input_ids)
+
+    QLoRA usage:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            "model-name", load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = VLoRAModel(base_model, subspace, compute_dtype=torch.bfloat16)
     """
 
     def __init__(
@@ -36,10 +63,12 @@ class VLoRAModel(nn.Module):
         subspace: SharedSubspace,
         scaling: float | None = None,
         lora_alpha: float | None = None,
+        compute_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.base_model = base_model
         self.subspace = subspace
+        self.compute_dtype = compute_dtype
 
         # Resolve scaling: explicit scaling > lora_alpha/rank > 1.0
         if scaling is not None:
@@ -51,6 +80,7 @@ class VLoRAModel(nn.Module):
         self._active_task: str | None = None
         self._cached_deltas: dict[str, Tensor] | None = None
         self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._qlora_info = self._detect_quantization()
 
     def set_task(self, task_id: str) -> None:
         """Set the active task adapter. Reconstructs and caches if changed."""
@@ -84,7 +114,7 @@ class VLoRAModel(nn.Module):
             return
 
         for name, module in self.base_model.named_modules():
-            if name in self._cached_deltas and isinstance(module, nn.Linear):
+            if name in self._cached_deltas and _is_linear_layer(module):
                 delta = self._cached_deltas[name]
                 hook = module.register_forward_hook(
                     self._make_lora_hook(delta)
@@ -100,12 +130,15 @@ class VLoRAModel(nn.Module):
     def _make_lora_hook(self, delta: Tensor):
         """Create a forward hook that adds LoRA delta to the output."""
         scaling = self.scaling
+        compute_dtype = self.compute_dtype
 
         def hook(module: nn.Module, input: Any, output: Tensor) -> Tensor:
-            # input[0] is the input tensor to the linear layer
             x = input[0] if isinstance(input, tuple) else input
-            lora_out = x @ delta.T.to(x.device, x.dtype)
-            return output + scaling * lora_out
+            # Use explicit compute_dtype when set (important for QLoRA
+            # where base model runs in BF16 but deltas are float32).
+            dtype = compute_dtype if compute_dtype is not None else x.dtype
+            lora_out = x.to(dtype) @ delta.T.to(x.device, dtype)
+            return output + scaling * lora_out.to(output.dtype)
 
         return hook
 
@@ -134,6 +167,48 @@ class VLoRAModel(nn.Module):
         for layer_name in weights.layer_names:
             deltas[layer_name] = weights.lora_b[layer_name] @ weights.lora_a[layer_name]
         return deltas
+
+    def _detect_quantization(self) -> dict:
+        """Introspect base model for quantized layers."""
+        info: dict[str, Any] = {
+            "quantized": False,
+            "method": None,
+            "num_quantized_layers": 0,
+            "num_target_layers": 0,
+        }
+        try:
+            import bitsandbytes as bnb
+
+            for name, module in self.base_model.named_modules():
+                if isinstance(module, bnb.nn.Linear4bit):
+                    info["quantized"] = True
+                    info["method"] = info["method"] or "nf4"
+                    info["num_quantized_layers"] += 1
+                elif isinstance(module, bnb.nn.Linear8bitLt):
+                    info["quantized"] = True
+                    info["method"] = info["method"] or "int8"
+                    info["num_quantized_layers"] += 1
+        except ImportError:
+            pass
+
+        # Count how many subspace layers match modules in the base model
+        for name, module in self.base_model.named_modules():
+            if name in self.subspace.layer_names and _is_linear_layer(module):
+                info["num_target_layers"] += 1
+
+        return info
+
+    @property
+    def qlora_info(self) -> dict:
+        """Quantization info about the base model.
+
+        Returns a dict with keys:
+        - ``quantized``: whether bitsandbytes quantized layers were detected
+        - ``method``: ``"nf4"``, ``"int8"``, or ``None``
+        - ``num_quantized_layers``: count of quantized linear layers
+        - ``num_target_layers``: subspace layers matched in the base model
+        """
+        return dict(self._qlora_info)
 
     def compile(self, **kwargs) -> VLoRAModel:
         """Compile the base model with torch.compile for faster inference.

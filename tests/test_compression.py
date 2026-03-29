@@ -121,6 +121,67 @@ class TestQuantize:
             assert sub.components_a[l].shape == shapes_before[l]
 
 
+class TestQuantizeNF4:
+    def test_nf4_basic(self):
+        adapters, _ = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        result = sub.quantize(method="nf4")
+        assert result is sub
+
+    def test_nf4_preserves_shape(self):
+        adapters, layers = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        shapes = {l: sub.components_a[l].shape for l in layers}
+        sub.quantize(method="nf4")
+        for l in layers:
+            assert sub.components_a[l].shape == shapes[l]
+
+    def test_nf4_introduces_small_error(self):
+        adapters, layers = _make_adapters(3, rank=4, dim=64)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        recon_before = sub.reconstruct("task_0")
+        sub.quantize(method="nf4")
+        recon_after = sub.reconstruct("task_0")
+        for l in layers:
+            diff = (recon_before.lora_a[l] - recon_after.lora_a[l]).abs().max()
+            assert diff < 1.0
+
+    def test_nf4_custom_block_size(self):
+        adapters, _ = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        sub.quantize(method="nf4", block_size=32)
+
+    def test_quantize_loadings_false_by_default(self):
+        adapters, layers = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        loadings_before = sub.tasks["task_0"].loadings_a[layers[0]].clone()
+        sub.quantize(method="nf4")
+        # Loadings should be unchanged
+        assert torch.equal(sub.tasks["task_0"].loadings_a[layers[0]], loadings_before)
+
+    def test_quantize_loadings_true(self):
+        adapters, layers = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        loadings_before = sub.tasks["task_0"].loadings_a[layers[0]].clone()
+        sub.quantize(method="nf4", quantize_loadings=True)
+        # Loadings should be modified (unless they happen to already be NF4 values)
+        # We check that the method ran without error; exact comparison is unreliable
+        assert sub.tasks["task_0"].loadings_a[layers[0]].shape == loadings_before.shape
+
+    def test_symmetric_quantize_loadings(self):
+        adapters, layers = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        loadings_before = sub.tasks["task_0"].loadings_a[layers[0]].clone()
+        sub.quantize(bits=8, method="symmetric", quantize_loadings=True)
+        assert sub.tasks["task_0"].loadings_a[layers[0]].shape == loadings_before.shape
+
+    def test_invalid_method_raises(self):
+        adapters, _ = _make_adapters(3)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        with pytest.raises(ValueError, match="method must be"):
+            sub.quantize(method="bogus")
+
+
 class TestCompressionStats:
     def test_stats_keys(self):
         adapters, _ = _make_adapters(3)

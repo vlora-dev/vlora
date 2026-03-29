@@ -9,6 +9,15 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+# NF4 quantile levels from QLoRA (Dettmers et al., 2023).
+# 16 values chosen so each bin captures equal probability mass
+# under a standard normal distribution, minimizing expected
+# quantization error for normally-distributed weights.
+NF4_QUANT_TABLE = torch.tensor([
+    -1.0, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0,
+     0.0796, 0.1609, 0.2461, 0.3379, 0.4407, 0.5626, 0.7230, 1.0,
+])
+
 
 def compute_svd(
     data_matrix: Tensor,
@@ -227,3 +236,53 @@ def select_num_components(singular_values: Tensor, threshold: float = 0.6) -> in
     if len(above) == 0:
         return len(singular_values)
     return above[0].item() + 1
+
+
+def nf4_quantize_dequantize(tensor: Tensor, block_size: int = 64) -> Tensor:
+    """Simulate NF4 quantization by snapping values to NF4 levels.
+
+    Applies per-block absmax normalization, maps each value to the
+    nearest NF4 quantile level, and dequantizes back to float.
+    The returned tensor is the same dtype as input but only contains
+    values representable in NF4 format.
+
+    Based on QLoRA (Dettmers et al., 2023, arXiv:2305.14314).
+
+    Args:
+        tensor: Tensor to quantize.
+        block_size: Number of elements per quantization block.
+            Smaller blocks = finer granularity = less error. Default 64.
+
+    Returns:
+        Dequantized tensor with same shape and dtype as input.
+    """
+    original_shape = tensor.shape
+    original_dtype = tensor.dtype
+    flat = tensor.detach().float().flatten()
+    numel = flat.numel()
+
+    # Pad to multiple of block_size
+    remainder = numel % block_size
+    if remainder:
+        pad = block_size - remainder
+        flat = torch.cat([flat, torch.zeros(pad, device=flat.device)])
+
+    # Reshape into blocks: (num_blocks, block_size)
+    blocks = flat.reshape(-1, block_size)
+
+    # Per-block absmax normalization → values in [-1, 1]
+    absmax = blocks.abs().amax(dim=1, keepdim=True).clamp(min=1e-10)
+    normalized = blocks / absmax
+
+    # Snap each value to nearest NF4 level
+    table = NF4_QUANT_TABLE.to(device=normalized.device, dtype=normalized.dtype)
+    # (num_blocks, block_size, 1) vs (1, 1, 16) → distances (num_blocks, block_size, 16)
+    distances = (normalized.unsqueeze(-1) - table).abs()
+    indices = distances.argmin(dim=-1)
+    quantized_normalized = table[indices]
+
+    # Dequantize: scale back by absmax
+    dequantized = quantized_normalized * absmax
+
+    # Remove padding and restore shape
+    return dequantized.flatten()[:numel].reshape(original_shape).to(original_dtype)

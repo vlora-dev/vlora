@@ -4,9 +4,11 @@ import torch
 import pytest
 
 from vlora.ops import (
+    NF4_QUANT_TABLE,
     compute_svd,
     explained_variance_ratio,
     gram_schmidt,
+    nf4_quantize_dequantize,
     project_onto_subspace,
     reconstruct_from_subspace,
     select_num_components,
@@ -119,3 +121,87 @@ class TestVariance:
         svals = torch.tensor([1.0, 1.0])
         k = select_num_components(svals, threshold=0.99999)
         assert k == 2
+
+
+class TestNF4Quantization:
+    def test_table_has_16_levels(self):
+        assert NF4_QUANT_TABLE.shape == (16,)
+
+    def test_table_is_sorted(self):
+        for i in range(len(NF4_QUANT_TABLE) - 1):
+            assert NF4_QUANT_TABLE[i] < NF4_QUANT_TABLE[i + 1]
+
+    def test_table_range(self):
+        assert NF4_QUANT_TABLE[0] == -1.0
+        assert NF4_QUANT_TABLE[-1] == 1.0
+
+    def test_output_shape_preserved(self):
+        t = torch.randn(4, 8)
+        result = nf4_quantize_dequantize(t, block_size=8)
+        assert result.shape == t.shape
+
+    def test_output_dtype_preserved(self):
+        for dtype in [torch.float32, torch.float64]:
+            t = torch.randn(16, dtype=dtype)
+            result = nf4_quantize_dequantize(t, block_size=16)
+            assert result.dtype == dtype
+
+    def test_zero_tensor_unchanged(self):
+        t = torch.zeros(64)
+        result = nf4_quantize_dequantize(t, block_size=64)
+        assert torch.allclose(result, t, atol=1e-8)
+
+    def test_values_snap_to_nf4_levels(self):
+        # A single block — after quantization, normalized values
+        # should be exactly NF4 levels.
+        t = torch.randn(64)
+        result = nf4_quantize_dequantize(t, block_size=64)
+        absmax = t.abs().max().clamp(min=1e-10)
+        normalized = result / absmax
+        table = NF4_QUANT_TABLE
+        for val in normalized:
+            dists = (val - table).abs()
+            assert dists.min() < 1e-5
+
+    def test_small_error_for_normal_data(self):
+        torch.manual_seed(42)
+        t = torch.randn(1024)
+        result = nf4_quantize_dequantize(t, block_size=64)
+        # Relative error should be small for normally distributed data
+        error = (t - result).norm() / t.norm()
+        assert error < 0.15  # < 15% relative error
+
+    def test_nf4_beats_symmetric_int4_for_normal_data(self):
+        torch.manual_seed(42)
+        t = torch.randn(1024)
+
+        # NF4 error
+        nf4_result = nf4_quantize_dequantize(t, block_size=64)
+        nf4_error = (t - nf4_result).norm()
+
+        # Symmetric int4 per-tensor error (same as existing quantize)
+        qmax = 7
+        scale = t.abs().max() / qmax
+        sym_result = ((t / scale).round().clamp(-qmax, qmax)) * scale
+        sym_error = (t - sym_result).norm()
+
+        assert nf4_error < sym_error
+
+    def test_handles_non_multiple_of_block_size(self):
+        # 100 elements with block_size=64 → needs padding
+        t = torch.randn(100)
+        result = nf4_quantize_dequantize(t, block_size=64)
+        assert result.shape == (100,)
+
+    def test_multidimensional_input(self):
+        t = torch.randn(3, 5, 64)
+        result = nf4_quantize_dequantize(t, block_size=64)
+        assert result.shape == (3, 5, 64)
+
+    def test_smaller_block_size_lower_error(self):
+        torch.manual_seed(42)
+        t = torch.randn(1024)
+        err_64 = (t - nf4_quantize_dequantize(t, block_size=64)).norm()
+        err_32 = (t - nf4_quantize_dequantize(t, block_size=32)).norm()
+        # Smaller blocks should generally give equal or lower error
+        assert err_32 <= err_64 + 1e-4

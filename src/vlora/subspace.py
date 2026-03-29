@@ -30,6 +30,7 @@ from vlora.ops import (
     explained_variance_ratio,
     gram_schmidt,
     incremental_svd_update,
+    nf4_quantize_dequantize,
     project_onto_subspace,
     reconstruct_from_subspace,
     select_num_components,
@@ -300,6 +301,9 @@ class SharedSubspace:
         the new adapter onto the existing basis, measures the residual, and
         expands the basis with any significant new directions.
 
+        Existing tasks are properly re-projected onto the updated basis
+        by reconstructing their weights from the old basis first.
+
         Much faster than absorb() for large collections, with a small
         approximation trade-off.
         """
@@ -307,6 +311,12 @@ class SharedSubspace:
         logger.debug("Absorbing adapter '%s' incrementally", new_task_id)
         loadings_a: dict[str, Tensor] = {}
         loadings_b: dict[str, Tensor] = {}
+
+        # Snapshot old basis per layer so we can reconstruct existing tasks
+        old_comps_a = {l: self.components_a[l].clone() for l in self.layer_names}
+        old_comps_b = {l: self.components_b[l].clone() for l in self.layer_names}
+        old_means_a = {l: self.means_a[l].clone() for l in self.layer_names}
+        old_means_b = {l: self.means_b[l].clone() for l in self.layer_names}
 
         for layer in self.layer_names:
             for side, weights_dict, comp_attr, sv_attr, mean_attr, load_dict in [
@@ -329,26 +339,27 @@ class SharedSubspace:
                 getattr(self, sv_attr)[layer] = new_svals
                 getattr(self, mean_attr)[layer] = new_mean
 
-                # Project with updated basis
+                # Project new adapter with updated basis
                 centered = flat.squeeze(0) - new_mean
                 load_dict[layer] = project_onto_subspace(centered, new_comps)
 
-        # Re-project existing tasks onto updated basis
+        # Re-project existing tasks: reconstruct from OLD basis, project onto NEW
         for tid, proj in self.tasks.items():
             for layer in self.layer_names:
-                # Reconstruct from old loadings, then re-project
-                for side, comp_attr, mean_attr, old_loads, new_loads_attr in [
-                    ("a", "components_a", "means_a", proj.loadings_a, "loadings_a"),
-                    ("b", "components_b", "means_b", proj.loadings_b, "loadings_b"),
+                for old_comps, old_means, old_loads, comp_attr, mean_attr in [
+                    (old_comps_a, old_means_a, proj.loadings_a, "components_a", "means_a"),
+                    (old_comps_b, old_means_b, proj.loadings_b, "components_b", "means_b"),
                 ]:
+                    # Reconstruct flat weights from old basis
+                    flat_weights = reconstruct_from_subspace(
+                        old_comps[layer], old_loads[layer]
+                    ) + old_means[layer]
+                    # Re-project onto updated basis
                     new_comps = getattr(self, comp_attr)[layer]
-                    # Pad old loadings if basis grew
-                    old = old_loads[layer]
-                    if old.shape[0] < new_comps.shape[0]:
-                        old = torch.cat([old, torch.zeros(new_comps.shape[0] - old.shape[0])])
-                    elif old.shape[0] > new_comps.shape[0]:
-                        old = old[:new_comps.shape[0]]
-                    old_loads[layer] = old
+                    new_mean = getattr(self, mean_attr)[layer]
+                    old_loads[layer] = project_onto_subspace(
+                        flat_weights - new_mean, new_comps
+                    )
 
         self.tasks[new_task_id] = TaskProjection(
             task_id=new_task_id, loadings_a=loadings_a, loadings_b=loadings_b
@@ -428,38 +439,91 @@ class SharedSubspace:
 
         return self
 
-    def quantize(self, bits: int = 8) -> SharedSubspace:
-        """Quantize components to reduce memory footprint.
+    def quantize(
+        self,
+        bits: int = 8,
+        method: Literal["symmetric", "nf4"] = "symmetric",
+        block_size: int = 64,
+        quantize_loadings: bool = False,
+    ) -> SharedSubspace:
+        """Quantize components (and optionally loadings) to reduce memory.
 
-        Applies symmetric per-tensor quantization to the component matrices.
-        Loadings and means are kept in float32 for accuracy. This is a
-        lossy operation — quantized components introduce small reconstruction
-        errors but can reduce memory by 2-4x.
+        Two methods are available:
+
+        - ``"symmetric"`` (default): uniform per-tensor quantization at the
+          specified bit width (4 or 8). Simple and fast.
+        - ``"nf4"``: 4-bit NormalFloat quantization from QLoRA (Dettmers et
+          al., 2023). Uses 16 quantile levels optimized for normally-
+          distributed data with per-block absmax scaling. Lower error than
+          symmetric int4 when weights are approximately normal.
+
+        This is a lossy, in-place operation.
 
         Args:
-            bits: Quantization bit width (8 or 4). Default 8.
+            bits: Bit width for symmetric quantization (4 or 8). Ignored
+                when method is ``"nf4"`` (always 4-bit).
+            method: Quantization method — ``"symmetric"`` or ``"nf4"``.
+            block_size: Elements per quantization block for NF4. Smaller
+                blocks give finer granularity. Default 64. Ignored for
+                symmetric quantization.
+            quantize_loadings: If True, also quantize per-task loadings
+                (not just components). Loadings from dot products of
+                normal-ish weights tend to be approximately normal, so
+                NF4 is especially effective here.
 
         Returns:
             self (modified in-place).
         """
-        if bits not in (4, 8):
-            raise ValueError(f"bits must be 4 or 8, got {bits}")
+        if method == "symmetric":
+            if bits not in (4, 8):
+                raise ValueError(f"bits must be 4 or 8, got {bits}")
+            self._quantize_symmetric(bits, quantize_loadings)
+        elif method == "nf4":
+            self._quantize_nf4(block_size, quantize_loadings)
+        else:
+            raise ValueError(f"method must be 'symmetric' or 'nf4', got {method!r}")
 
+        return self
+
+    def _quantize_symmetric(self, bits: int, quantize_loadings: bool) -> None:
+        """Symmetric per-tensor quantization."""
         qmax = (1 << (bits - 1)) - 1  # 127 for int8, 7 for int4
 
         for layer in self.layer_names:
             for attr in ["components_a", "components_b"]:
                 d = getattr(self, attr)
                 t = d[layer].float()
-                # Symmetric quantization: scale = max(abs(t)) / qmax
                 scale = t.abs().max() / qmax
                 if scale == 0:
                     continue
-                # Quantize, round, dequantize
                 quantized = (t / scale).round().clamp(-qmax, qmax)
                 d[layer] = (quantized * scale).to(t.dtype)
 
-        return self
+        if quantize_loadings:
+            for proj in self.tasks.values():
+                for loads in [proj.loadings_a, proj.loadings_b]:
+                    for layer in self.layer_names:
+                        t = loads[layer].float()
+                        scale = t.abs().max() / qmax
+                        if scale == 0:
+                            continue
+                        quantized = (t / scale).round().clamp(-qmax, qmax)
+                        loads[layer] = (quantized * scale).to(t.dtype)
+
+    def _quantize_nf4(self, block_size: int, quantize_loadings: bool) -> None:
+        """NF4 per-block quantization (QLoRA-style)."""
+        for layer in self.layer_names:
+            for attr in ["components_a", "components_b"]:
+                d = getattr(self, attr)
+                d[layer] = nf4_quantize_dequantize(d[layer], block_size)
+
+        if quantize_loadings:
+            for proj in self.tasks.values():
+                for loads in [proj.loadings_a, proj.loadings_b]:
+                    for layer in self.layer_names:
+                        loads[layer] = nf4_quantize_dequantize(
+                            loads[layer], block_size
+                        )
 
     def compression_stats(self) -> dict:
         """Compute compression statistics for the current subspace.

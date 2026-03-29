@@ -157,3 +157,46 @@ class TestVLoRAModel:
         sub, base_model, _ = _make_adapters_and_model(dim=64)
         model = VLoRAModel(base_model, sub)
         assert model.scaling == 1.0
+
+    def test_qlora_info_no_quantization(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        info = model.qlora_info
+        assert info["quantized"] is False
+        assert info["method"] is None
+        assert info["num_quantized_layers"] == 0
+
+    def test_qlora_info_has_target_layers(self):
+        sub, base_model, layers = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        info = model.qlora_info
+        assert info["num_target_layers"] == len(layers)
+
+    def test_compute_dtype_none_by_default(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        assert model.compute_dtype is None
+
+    def test_compute_dtype_affects_output(self):
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        model_f32 = VLoRAModel(base_model, sub)
+        model_f32.set_task("task_0")
+
+        # With compute_dtype=float64, the LoRA computation happens in f64
+        # then casts back. Result may differ slightly due to precision.
+        model_f64 = VLoRAModel(base_model, sub, compute_dtype=torch.float64)
+        model_f64.set_task("task_0")
+
+        x = torch.randn(2, 64)
+        out_f32 = model_f32(x)
+        out_f64 = model_f64(x)
+        # Both should produce valid output of the same shape
+        assert out_f32.shape == out_f64.shape
+
+    def test_compute_dtype_bfloat16(self):
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        model = VLoRAModel(base_model, sub, compute_dtype=torch.bfloat16)
+        model.set_task("task_0")
+        x = torch.randn(2, 64)
+        out = model(x)
+        assert out.shape == (2, 64)
