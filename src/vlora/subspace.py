@@ -30,7 +30,9 @@ from vlora.ops import (
     explained_variance_ratio,
     gram_schmidt,
     incremental_svd_update,
+    nf4_pack,
     nf4_quantize_dequantize,
+    nf4_unpack,
     project_onto_subspace,
     reconstruct_from_subspace,
     select_num_components,
@@ -795,9 +797,76 @@ class SharedSubspace:
         with open(path / "subspace_meta.json", "w") as f:
             json.dump(meta, f, indent=2)
 
+    def save_quantized(
+        self, path: str | Path, block_size: int = 64
+    ) -> None:
+        """Save subspace with NF4-packed components for ~7x disk savings.
+
+        Components are packed to 4-bit NF4 indices (uint8, two values
+        per byte) with per-block float32 scales. Means, singular values,
+        and loadings remain in float32. Auto-detected by ``load()``.
+
+        Args:
+            path: Directory to save into.
+            block_size: NF4 quantization block size.
+        """
+        import json
+
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # Pack components to NF4 and save non-packed tensors separately
+        packed_tensors: dict[str, Tensor] = {}
+        float_tensors: dict[str, Tensor] = {}
+
+        for layer in self.layer_names:
+            for side, comp_attr in [("a", "components_a"), ("b", "components_b")]:
+                tensor = getattr(self, comp_attr)[layer]
+                packed, scales, numel = nf4_pack(tensor, block_size)
+                packed_tensors[f"{layer}.packed_{side}"] = packed.contiguous()
+                packed_tensors[f"{layer}.scales_{side}"] = scales.contiguous()
+
+            float_tensors[f"{layer}.sv_a"] = self.singular_values_a[layer].contiguous()
+            float_tensors[f"{layer}.sv_b"] = self.singular_values_b[layer].contiguous()
+            float_tensors[f"{layer}.mean_a"] = self.means_a[layer].contiguous()
+            float_tensors[f"{layer}.mean_b"] = self.means_b[layer].contiguous()
+
+        save_file(packed_tensors, str(path / "subspace_nf4.safetensors"))
+        save_file(float_tensors, str(path / "subspace_float.safetensors"))
+
+        # Save per-task loadings (same as save())
+        tid_to_filename: dict[str, str] = {}
+        for tid, proj in self.tasks.items():
+            safe_name = self._safe_filename(tid)
+            tid_to_filename[tid] = safe_name
+            task_tensors = {}
+            for layer in self.layer_names:
+                task_tensors[f"{layer}.loadings_a"] = proj.loadings_a[layer].contiguous()
+                task_tensors[f"{layer}.loadings_b"] = proj.loadings_b[layer].contiguous()
+            save_file(task_tensors, str(path / f"task_{safe_name}.safetensors"))
+
+        meta = {
+            "layer_names": self.layer_names,
+            "task_ids": list(self.tasks.keys()),
+            "task_filenames": tid_to_filename,
+            "rank": self.rank,
+            "num_components": self.num_components,
+            "shapes_a": {l: list(s) for l, s in self.shapes_a.items()},
+            "shapes_b": {l: list(s) for l, s in self.shapes_b.items()},
+            "adaptive_k": self.adaptive_k,
+            "variance_threshold": self.variance_threshold,
+            "format": "nf4_packed",
+            "nf4_block_size": block_size,
+        }
+        with open(path / "subspace_meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
     @classmethod
     def load(cls, path: str | Path) -> SharedSubspace:
-        """Deserialize a subspace from disk."""
+        """Deserialize a subspace from disk.
+
+        Auto-detects format: standard float32 or NF4-packed.
+        """
         import json
 
         path = Path(path)
@@ -805,11 +874,18 @@ class SharedSubspace:
         with open(path / "subspace_meta.json") as f:
             meta = json.load(f)
 
+        fmt = meta.get("format", "float32")
+        if fmt == "nf4_packed":
+            return cls._load_nf4(path, meta)
+        return cls._load_float(path, meta)
+
+    @classmethod
+    def _load_float(cls, path: Path, meta: dict) -> SharedSubspace:
+        """Load standard float32 format."""
         layer_names = meta["layer_names"]
         task_ids = meta["task_ids"]
         rank = meta["rank"]
         num_components = meta["num_components"]
-        # Support both old format (no mapping) and new format
         tid_to_filename = meta.get("task_filenames", {})
         shapes_a_raw = meta.get("shapes_a")
         shapes_b_raw = meta.get("shapes_b")
@@ -825,6 +901,87 @@ class SharedSubspace:
         sv_b = {l: tensors[f"{l}.sv_b"] for l in layer_names}
         means_a = {l: tensors[f"{l}.mean_a"] for l in layer_names}
         means_b = {l: tensors[f"{l}.mean_b"] for l in layer_names}
+
+        tasks = {}
+        for tid in task_ids:
+            safe_name = tid_to_filename.get(tid, tid)
+            task_tensors = load_file(str(path / f"task_{safe_name}.safetensors"))
+            loadings_a = {l: task_tensors[f"{l}.loadings_a"] for l in layer_names}
+            loadings_b = {l: task_tensors[f"{l}.loadings_b"] for l in layer_names}
+            tasks[tid] = TaskProjection(
+                task_id=tid, loadings_a=loadings_a, loadings_b=loadings_b
+            )
+
+        return cls(
+            layer_names=layer_names,
+            components_a=components_a,
+            components_b=components_b,
+            singular_values_a=sv_a,
+            singular_values_b=sv_b,
+            means_a=means_a,
+            means_b=means_b,
+            tasks=tasks,
+            rank=rank,
+            num_components=num_components,
+            shapes_a=shapes_a,
+            shapes_b=shapes_b,
+            adaptive_k=adaptive_k,
+            variance_threshold=variance_threshold,
+        )
+
+    @classmethod
+    def _load_nf4(cls, path: Path, meta: dict) -> SharedSubspace:
+        """Load NF4-packed format, dequantizing components on the fly."""
+        layer_names = meta["layer_names"]
+        task_ids = meta["task_ids"]
+        rank = meta["rank"]
+        num_components = meta["num_components"]
+        block_size = meta.get("nf4_block_size", 64)
+        tid_to_filename = meta.get("task_filenames", {})
+        shapes_a_raw = meta.get("shapes_a")
+        shapes_b_raw = meta.get("shapes_b")
+        shapes_a = {l: tuple(s) for l, s in shapes_a_raw.items()} if shapes_a_raw else None
+        shapes_b = {l: tuple(s) for l, s in shapes_b_raw.items()} if shapes_b_raw else None
+        adaptive_k = meta.get("adaptive_k", False)
+        variance_threshold = meta.get("variance_threshold", 0.6)
+
+        packed = load_file(str(path / "subspace_nf4.safetensors"))
+        floats = load_file(str(path / "subspace_float.safetensors"))
+
+        components_a: dict[str, Tensor] = {}
+        components_b: dict[str, Tensor] = {}
+
+        for layer in layer_names:
+            for side, comp_dict in [("a", components_a), ("b", components_b)]:
+                packed_data = packed[f"{layer}.packed_{side}"]
+                scales = packed[f"{layer}.scales_{side}"]
+                # Determine original numel from shapes or num_components
+                if shapes_a_raw and side == "a":
+                    shape = tuple(shapes_a_raw[layer])
+                    k = num_components
+                    # Component shape is (k, flattened_dim) where flattened_dim = product(shape)
+                    dim = shape[0] * shape[1]  # rank * in_features
+                elif shapes_b_raw and side == "b":
+                    shape = tuple(shapes_b_raw[layer])
+                    dim = shape[0] * shape[1]  # out_features * rank
+                else:
+                    # Fallback: infer from scales
+                    dim = len(scales) * block_size
+
+                # Get per-layer k
+                k_side = num_components
+                # Check if this layer has fewer components (adaptive_k)
+                if f"{layer}.sv_{side}" in floats:
+                    k_side = min(k_side, floats[f"{layer}.sv_{side}"].shape[0])
+
+                numel = k_side * dim
+                flat = nf4_unpack(packed_data, scales, numel, block_size)
+                comp_dict[layer] = flat.reshape(k_side, dim)
+
+        sv_a = {l: floats[f"{l}.sv_a"] for l in layer_names}
+        sv_b = {l: floats[f"{l}.sv_b"] for l in layer_names}
+        means_a = {l: floats[f"{l}.mean_a"] for l in layer_names}
+        means_b = {l: floats[f"{l}.mean_b"] for l in layer_names}
 
         tasks = {}
         for tid in task_ids:

@@ -8,7 +8,9 @@ from vlora.ops import (
     compute_svd,
     explained_variance_ratio,
     gram_schmidt,
+    nf4_pack,
     nf4_quantize_dequantize,
+    nf4_unpack,
     project_onto_subspace,
     reconstruct_from_subspace,
     select_num_components,
@@ -205,3 +207,50 @@ class TestNF4Quantization:
         err_32 = (t - nf4_quantize_dequantize(t, block_size=32)).norm()
         # Smaller blocks should generally give equal or lower error
         assert err_32 <= err_64 + 1e-4
+
+    def test_double_quant_runs(self):
+        t = torch.randn(256)
+        result = nf4_quantize_dequantize(t, block_size=64, double_quant=True)
+        assert result.shape == t.shape
+
+    def test_double_quant_slightly_more_error(self):
+        torch.manual_seed(42)
+        t = torch.randn(1024)
+        err_normal = (t - nf4_quantize_dequantize(t, block_size=64)).norm()
+        err_double = (t - nf4_quantize_dequantize(t, block_size=64, double_quant=True)).norm()
+        # Double quant adds a bit more error (or equal)
+        assert err_double >= err_normal - 1e-4
+
+
+class TestNF4PackUnpack:
+    def test_roundtrip(self):
+        torch.manual_seed(42)
+        t = torch.randn(256)
+        packed, scales, numel = nf4_pack(t, block_size=64)
+        unpacked = nf4_unpack(packed, scales, numel, block_size=64)
+        # Roundtrip should match NF4 simulate-quantize
+        simulated = nf4_quantize_dequantize(t, block_size=64)
+        assert torch.allclose(unpacked, simulated, atol=1e-5)
+
+    def test_packed_is_smaller(self):
+        t = torch.randn(1024)
+        packed, scales, numel = nf4_pack(t, block_size=64)
+        original_bytes = t.numel() * 4  # float32
+        packed_bytes = packed.numel() + scales.numel() * 4  # uint8 + float32 scales
+        assert packed_bytes < original_bytes
+
+    def test_compression_ratio(self):
+        t = torch.randn(4096)
+        packed, scales, numel = nf4_pack(t, block_size=64)
+        original_bytes = t.numel() * 4
+        packed_bytes = packed.numel() + scales.numel() * 4
+        ratio = original_bytes / packed_bytes
+        # Should be roughly 6-7x
+        assert ratio > 5.0
+
+    def test_preserves_numel(self):
+        t = torch.randn(100)  # Not a multiple of block_size
+        packed, scales, numel = nf4_pack(t, block_size=64)
+        assert numel == 100
+        unpacked = nf4_unpack(packed, scales, numel, block_size=64)
+        assert unpacked.shape == (100,)

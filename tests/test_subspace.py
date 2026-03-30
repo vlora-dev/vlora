@@ -128,6 +128,49 @@ class TestSaveLoad:
             assert torch.allclose(loaded.components_b[l], sub.components_b[l])
 
 
+class TestSaveLoadQuantized:
+    def test_nf4_roundtrip(self, tmp_path):
+        adapters, layers = _make_adapters(3, rank=4, dim=64)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+
+        # Save quantized
+        sub.save_quantized(tmp_path / "subspace_nf4")
+        loaded = SharedSubspace.load(tmp_path / "subspace_nf4")
+
+        assert loaded.layer_names == sub.layer_names
+        assert loaded.num_components == sub.num_components
+        assert set(loaded.tasks.keys()) == set(sub.tasks.keys())
+
+        # Components should be NF4-approximated (not exact)
+        for l in layers:
+            assert loaded.components_a[l].shape == sub.components_a[l].shape
+
+    def test_nf4_reconstruction_close(self, tmp_path):
+        adapters, layers = _make_adapters(3, rank=4, dim=64)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+        recon_orig = sub.reconstruct("task_0")
+
+        sub.save_quantized(tmp_path / "subspace_nf4")
+        loaded = SharedSubspace.load(tmp_path / "subspace_nf4")
+        recon_nf4 = loaded.reconstruct("task_0")
+
+        for l in layers:
+            diff = (recon_orig.lora_a[l] - recon_nf4.lora_a[l]).abs().max()
+            assert diff < 2.0  # NF4 introduces some error
+
+    def test_nf4_files_smaller(self, tmp_path):
+        adapters, _ = _make_adapters(3, rank=4, dim=64)
+        sub = SharedSubspace.from_adapters(adapters, num_components=2)
+
+        sub.save(tmp_path / "float")
+        sub.save_quantized(tmp_path / "nf4")
+
+        float_size = (tmp_path / "float" / "subspace.safetensors").stat().st_size
+        nf4_size = (tmp_path / "nf4" / "subspace_nf4.safetensors").stat().st_size
+        # Packed should be significantly smaller
+        assert nf4_size < float_size
+
+
 class TestNonSquareLoRA:
     """Test with in_features != out_features (realistic LoRA shapes)."""
 

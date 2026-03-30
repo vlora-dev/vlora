@@ -322,3 +322,75 @@ def nf4_quantize_dequantize(
 
     # Remove padding and restore shape
     return dequantized.flatten()[:numel].reshape(original_shape).to(original_dtype)
+
+
+def nf4_pack(tensor: Tensor, block_size: int = 64) -> tuple[Tensor, Tensor, int]:
+    """Pack a float tensor into 4-bit NF4 format for storage.
+
+    Returns compact representation: uint8 packed indices + float32
+    per-block scales. Two 4-bit indices are packed per byte, giving
+    ~7x compression vs float32.
+
+    Args:
+        tensor: Float tensor to pack.
+        block_size: Elements per quantization block.
+
+    Returns:
+        packed: uint8 tensor (numel/2 bytes) with pairs of NF4 indices.
+        scales: float32 tensor (num_blocks,) per-block absmax values.
+        numel: Original number of elements (for unpadding).
+    """
+    flat = tensor.detach().float().flatten()
+    numel = flat.numel()
+
+    # Pad to multiple of block_size (and even for packing)
+    pad_to = block_size if block_size % 2 == 0 else block_size * 2
+    remainder = numel % pad_to
+    if remainder:
+        flat = torch.cat([flat, torch.zeros(pad_to - remainder, device=flat.device)])
+
+    blocks = flat.reshape(-1, block_size)
+    scales = blocks.abs().amax(dim=1).clamp(min=1e-10)
+    normalized = blocks / scales.unsqueeze(1)
+
+    # Map to NF4 indices (0-15)
+    table = NF4_QUANT_TABLE.to(device=normalized.device, dtype=normalized.dtype)
+    midpoints = (table[:-1] + table[1:]) / 2
+    indices = torch.bucketize(normalized, midpoints).to(torch.uint8)
+
+    # Pack two 4-bit values into one uint8: high nibble + low nibble
+    indices_flat = indices.flatten()
+    high = indices_flat[0::2]
+    low = indices_flat[1::2]
+    packed = (high << 4) | low
+
+    return packed, scales, numel
+
+
+def nf4_unpack(packed: Tensor, scales: Tensor, numel: int, block_size: int = 64) -> Tensor:
+    """Unpack NF4 data back to float32.
+
+    Args:
+        packed: uint8 tensor from nf4_pack.
+        scales: float32 per-block scales from nf4_pack.
+        numel: Original element count.
+        block_size: Block size used during packing.
+
+    Returns:
+        Float32 tensor with numel elements.
+    """
+    # Unpack two 4-bit indices from each byte
+    high = (packed >> 4) & 0x0F
+    low = packed & 0x0F
+    indices = torch.stack([high, low], dim=1).flatten().long()
+
+    # Look up NF4 values
+    table = NF4_QUANT_TABLE.to(device=packed.device)
+    values = table[indices]
+
+    # Reshape into blocks and multiply by scales
+    n_padded = len(values)
+    blocks = values.reshape(-1, block_size)
+    dequantized = blocks * scales.unsqueeze(1)
+
+    return dequantized.flatten()[:numel]
