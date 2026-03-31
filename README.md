@@ -16,7 +16,7 @@ pip install vlora-dev
 
 Or from source:
 ```bash
-git clone https://github.com/tveseli/vlora.git
+git clone https://github.com/vlora-dev/vlora.git
 cd vlora
 pip install -e ".[dev]"
 ```
@@ -101,6 +101,77 @@ output = model(input_ids)
 print(model.available_tasks)  # ["task_0", "task_1", ...]
 ```
 
+## QLoRA Support
+
+vLoRA has first-class support for [QLoRA](https://arxiv.org/abs/2305.14314) workflows. QLoRA compresses the **base model** (FP16 → 4-bit NF4), while vLoRA compresses the **adapter space** — these are orthogonal and stack multiplicatively.
+
+### NF4 Quantization
+
+Quantize subspace components using the same NF4 data type from QLoRA — 16 quantile levels optimized for normally-distributed weights:
+
+```python
+# NF4 quantization (better than symmetric int4 for normal-ish weights)
+subspace.quantize(method="nf4")
+
+# With double quantization (quantize the per-block scales too)
+subspace.quantize(method="nf4", double_quant=True)
+
+# Also quantize loadings (effective when loadings are approximately normal)
+subspace.quantize(method="nf4", quantize_loadings=True)
+```
+
+### Packed NF4 Storage
+
+Save subspace in packed 4-bit format for ~7× disk savings:
+
+```python
+# Save: packs components as uint8 (two 4-bit values per byte)
+subspace.save_quantized("shared_subspace/")
+
+# Load: auto-detects format, dequantizes on the fly
+subspace = SharedSubspace.load("shared_subspace/")
+```
+
+### QLoRA Base Model
+
+`VLoRAModel` works with quantized base models loaded via bitsandbytes:
+
+```python
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from vlora import VLoRAModel, SharedSubspace
+
+# Load 4-bit base model
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
+base_model = AutoModelForCausalLM.from_pretrained("model-name", quantization_config=bnb_config)
+
+# Wrap with vLoRA — compute_dtype ensures LoRA math runs in BF16
+subspace = SharedSubspace.load("shared_subspace/")
+model = VLoRAModel(base_model, subspace, compute_dtype=torch.bfloat16)
+
+print(model.qlora_info)  # {'quantized': True, 'method': 'nf4', ...}
+model.set_task("task_0")
+output = model(input_ids)
+```
+
+### Full-Stack Compression
+
+Report combined savings across base model quantization and adapter compression:
+
+```python
+stats = subspace.full_stack_compression(
+    base_model_params=7_000_000_000,  # 7B model
+    base_model_bits=16,               # original FP16
+    quantized_bits=4,                 # QLoRA NF4
+)
+# → {'total_compression_ratio': 4.0, 'total_original_bytes': 14.0 GB, ...}
+```
+
+See [`examples/qlora_pipeline.py`](examples/qlora_pipeline.py) for a complete end-to-end example.
+
 ## Training in the Subspace
 
 Train only the loadings vector (k params per layer) instead of full LoRA matrices — 100×+ parameter reduction:
@@ -183,8 +254,10 @@ merged = dare_merge(adapters, drop_rate=0.5, seed=42)
 # Adaptive k: different components per layer based on explained variance
 subspace = SharedSubspace.from_adapters(adapters, adaptive_k=True, variance_threshold=0.9)
 
-# Quantize components for smaller memory footprint
-subspace.quantize(bits=8)  # or bits=4
+# Quantize components — symmetric (int8/int4) or NF4
+subspace.quantize(bits=8)                        # symmetric int8
+subspace.quantize(method="nf4")                  # NF4 4-bit (better for normal weights)
+subspace.quantize(method="nf4", double_quant=True)  # + quantize the scales
 
 # Check compression stats
 stats = subspace.compression_stats()
@@ -231,14 +304,16 @@ subspace.to(device="cuda", dtype=torch.float16)
   - `.absorb(adapter, task_id)` — Incorporate + recompute (full SVD)
   - `.absorb_incremental(adapter, task_id)` — Fast incremental update
   - `.get_trainable_params(task_id)` — For training integration
-  - `.quantize(bits=8)` — Quantize components (int8/int4)
+  - `.quantize(bits=8, method="symmetric")` — Quantize components (int8/int4/NF4)
   - `.compression_stats()` — Compression ratio and parameter counts
+  - `.full_stack_compression(base_model_params)` — Combined base + adapter stats
   - `.to(device, dtype)` — Move tensors to device/dtype
-  - `.save(path)` / `.load(path)` — Serialization
+  - `.save(path)` / `.save_quantized(path)` / `.load(path)` — Serialization (NF4-packed auto-detected)
 
 ### Model Integration
 
-- **`VLoRAModel(base_model, subspace, lora_alpha=None)`** — Inference wrapper with forward hooks
+- **`VLoRAModel(base_model, subspace, lora_alpha=None, compute_dtype=None)`** — Inference wrapper with forward hooks
+  - `.qlora_info` — Base model quantization metadata
   - `.set_task(task_id)` — Switch adapter (cached)
   - `.clear_task()` — Remove adapter
   - `.available_tasks` — List task IDs
@@ -289,6 +364,7 @@ subspace.to(device="cuda", dtype=torch.float16)
 - `compute_svd`, `project_onto_subspace`, `reconstruct_from_subspace`
 - `gram_schmidt`, `explained_variance_ratio`, `select_num_components`
 - `incremental_svd_update`
+- `nf4_quantize_dequantize`, `nf4_pack`, `nf4_unpack` — NF4 quantization (QLoRA)
 
 ## Benchmarks — Real-World Adapters
 
