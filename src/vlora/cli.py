@@ -92,15 +92,13 @@ def info(subspace_path: str, as_json: bool):
 @click.option("--adaptive-k", is_flag=True, help="Use per-layer adaptive k selection.")
 def compress(adapter_dirs: tuple[str, ...], output: str, num_components: int | None, variance_threshold: float, adaptive_k: bool):
     """Build shared subspace from adapter directories."""
-    click.echo(f"\n  Loading {len(adapter_dirs)} adapters...")
-
     adapters = []
     task_ids = []
-    for d in adapter_dirs:
-        path = Path(d)
-        adapters.append(load_adapter(path))
-        task_ids.append(path.name)
-        click.echo(f"    Loaded: {path.name}")
+    with click.progressbar(adapter_dirs, label="  Loading adapters") as bar:
+        for d in bar:
+            path = Path(d)
+            adapters.append(load_adapter(path))
+            task_ids.append(path.name)
 
     click.echo("  Building subspace...")
     sub = SharedSubspace.from_adapters(
@@ -182,14 +180,16 @@ def analyze(adapter_dirs: tuple[str, ...], threshold: float, as_json: bool):
 
     adapters = []
     names = []
-    for d in adapter_dirs:
-        path = Path(d)
-        adapters.append(load_adapter(path))
-        names.append(path.name)
+    with click.progressbar(adapter_dirs, label="  Loading adapters") as bar:
+        for d in bar:
+            path = Path(d)
+            adapters.append(load_adapter(path))
+            names.append(path.name)
 
     if len(adapters) < 2:
         raise click.ClickException("Need at least 2 adapters for analysis.")
 
+    click.echo("  Computing similarity matrix...")
     sim = compute_similarity_matrix(adapters)
     clusters = find_clusters(sim, threshold=threshold)
 
@@ -205,10 +205,6 @@ def analyze(adapter_dirs: tuple[str, ...], threshold: float, as_json: bool):
         }
         click.echo(json_mod.dumps(output, indent=2))
         return
-
-    click.echo(f"\n  Loading {len(adapter_dirs)} adapters...")
-    for n in names:
-        click.echo(f"    Loaded: {n}")
 
     click.echo("\n  Pairwise Cosine Similarity:")
     header = "  " + " " * 20 + "  ".join(f"{n[:8]:>8}" for n in names)
@@ -399,12 +395,11 @@ def merge(adapter_dirs: tuple[str, ...], output: str, method: str, weights: str 
     """Merge multiple adapters into one using task arithmetic, TIES, or DARE."""
     from vlora.merge import MERGE_METHODS
 
-    click.echo(f"\n  Loading {len(adapter_dirs)} adapters...")
     adapters = []
-    for d in adapter_dirs:
-        path = Path(d)
-        adapters.append(load_adapter(path))
-        click.echo(f"    Loaded: {path.name}")
+    with click.progressbar(adapter_dirs, label="  Loading adapters") as bar:
+        for d in bar:
+            path = Path(d)
+            adapters.append(load_adapter(path))
 
     if len(adapters) < 2:
         raise click.ClickException("Need at least 2 adapters to merge.")

@@ -7,6 +7,8 @@ Step 3: absorb         — incorporate new adapter, recompute basis
 
 from __future__ import annotations
 
+__all__ = ["SharedSubspace", "TaskProjection"]
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,7 +135,20 @@ class SharedSubspace:
                 the threshold. Overrides num_components.
         """
         check_adapters_compatible(adapters)
-        logger.info("Building subspace from %d adapters", len(adapters))
+
+        # Log memory estimate to help users anticipate resource needs
+        n_adapters = len(adapters)
+        sample_layer = adapters[0].layer_names[0]
+        dim_a = adapters[0].lora_a[sample_layer].numel()
+        dim_b = adapters[0].lora_b[sample_layer].numel()
+        n_layers = len(adapters[0].layer_names)
+        # SVD working memory: ~2 * (N * D * 4 bytes) per layer for A and B
+        svd_bytes = 2 * n_adapters * (dim_a + dim_b) * 4 * n_layers
+        svd_mb = svd_bytes / (1024 * 1024)
+        logger.info(
+            "Building subspace from %d adapters (%d layers, ~%.0f MB estimated)",
+            n_adapters, n_layers, svd_mb,
+        )
 
         if task_ids is None:
             task_ids = [f"task_{i}" for i in range(len(adapters))]

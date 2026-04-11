@@ -12,6 +12,8 @@ References:
 
 from __future__ import annotations
 
+__all__ = ["task_arithmetic", "ties_merge", "dare_merge", "MERGE_METHODS"]
+
 import logging
 
 import torch

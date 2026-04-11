@@ -6,6 +6,15 @@ library at runtime.
 
 from __future__ import annotations
 
+__all__ = [
+    "LoRAWeights",
+    "load_adapter",
+    "load_adapter_from_hub",
+    "save_adapter",
+    "parse_state_dict",
+    "stack_lora_weights",
+]
+
 import json
 import logging
 import re

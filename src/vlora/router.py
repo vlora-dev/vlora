@@ -5,6 +5,7 @@ weights. Since adapters are represented as small loading vectors in the
 shared subspace, blending is a cheap linear combination rather than
 reconstructing and merging full LoRA matrices.
 
+
 Usage:
     subspace = SharedSubspace.load("shared_subspace/")
     router = TaskRouter.from_subspace(subspace, hidden_dim=64)
@@ -16,6 +17,8 @@ Usage:
 """
 
 from __future__ import annotations
+
+__all__ = ["TaskRouter"]
 
 import torch
 import torch.nn as nn

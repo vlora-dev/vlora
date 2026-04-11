@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__all__ = ["init_subspace", "absorb_task", "extract_adapter"]
+
 from pathlib import Path
 
 from vlora.io import LoRAWeights, load_adapter, save_adapter

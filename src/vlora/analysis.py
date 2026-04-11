@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "adapter_diff",
+    "compute_similarity_matrix",
+    "find_clusters",
+    "find_outliers",
+    "subspace_coverage",
+]
+
 from typing import TYPE_CHECKING
 
 import torch

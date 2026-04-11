@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__all__ = ["VLoRAModel"]
+
 from typing import Any
 
 import torch
@@ -37,6 +39,11 @@ class VLoRAModel(nn.Module):
     quantized model (e.g. loaded with ``load_in_4bit=True``), set
     ``compute_dtype`` to match the model's compute precision (typically
     ``torch.bfloat16``).
+
+    Note: This class is **not thread-safe**. Concurrent calls to
+    ``set_task()``, ``merge()``, or ``forward()`` from multiple threads
+    may produce incorrect results. Use a lock or separate model instances
+    for multi-threaded serving.
 
     Usage:
         subspace = SharedSubspace.load("shared_subspace/")
@@ -311,6 +318,15 @@ class VLoRAModel(nn.Module):
     def is_merged(self) -> bool:
         """Whether LoRA deltas are currently baked into base weights."""
         return self._merged
+
+    def __repr__(self) -> str:
+        task = self._active_task or "none"
+        merged = " merged" if self._merged else ""
+        return (
+            f"VLoRAModel(tasks={len(self.subspace.tasks)}, "
+            f"active={task!r}{merged}, "
+            f"layers={len(self._target_modules)})"
+        )
 
     def compile(self, **kwargs) -> VLoRAModel:
         """Compile the base model with torch.compile for faster inference.

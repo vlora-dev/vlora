@@ -19,6 +19,8 @@ Usage:
 
 from __future__ import annotations
 
+__all__ = ["SubspaceTrainer", "orthogonal_init"]
+
 import torch
 from torch import Tensor
 
@@ -49,9 +51,11 @@ def orthogonal_init(
 
     for layer in subspace.layer_names:
         actual_k = subspace.components_a[layer].shape[0]
-        loadings_a[layer] = torch.randn(actual_k) * scale
+        device = subspace.components_a[layer].device
+        dtype = subspace.components_a[layer].dtype
+        loadings_a[layer] = torch.randn(actual_k, device=device, dtype=dtype) * scale
         # Initialize B-side to zero (like standard LoRA) so initial delta is zero
-        loadings_b[layer] = torch.zeros(actual_k)
+        loadings_b[layer] = torch.zeros(actual_k, device=device, dtype=dtype)
 
     proj = TaskProjection(task_id=task_id, loadings_a=loadings_a, loadings_b=loadings_b)
     subspace.tasks[task_id] = proj
@@ -145,3 +149,10 @@ class SubspaceTrainer:
     def step_count(self) -> int:
         """Number of optimizer steps taken."""
         return self._step_count
+
+    def __repr__(self) -> str:
+        return (
+            f"SubspaceTrainer(task={self.task_id!r}, "
+            f"params={self.num_trainable_params}, "
+            f"steps={self._step_count})"
+        )

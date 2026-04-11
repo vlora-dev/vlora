@@ -6,6 +6,20 @@ or subspace concepts leak in here.
 
 from __future__ import annotations
 
+__all__ = [
+    "NF4_QUANT_TABLE",
+    "compute_svd",
+    "explained_variance_ratio",
+    "gram_schmidt",
+    "incremental_svd_update",
+    "nf4_pack",
+    "nf4_quantize_dequantize",
+    "nf4_unpack",
+    "project_onto_subspace",
+    "reconstruct_from_subspace",
+    "select_num_components",
+]
+
 import torch
 from torch import Tensor
 
