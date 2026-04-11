@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from torch import Tensor
 
 from vlora.subspace import SharedSubspace, TaskProjection
@@ -45,7 +44,6 @@ def orthogonal_init(
     Returns:
         TaskProjection registered in the subspace.
     """
-    k = subspace.num_components
     loadings_a = {}
     loadings_b = {}
 
@@ -125,7 +123,7 @@ class SubspaceTrainer:
         loss.backward()
         self.optimizer.step()
         self._step_count += 1
-        return loss.item()
+        return loss.item()  # type: ignore[no-any-return]
 
     def write_back(self) -> None:
         """Write trained parameters back to the subspace's TaskProjection.

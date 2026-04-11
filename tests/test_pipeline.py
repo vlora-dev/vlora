@@ -1,7 +1,6 @@
 """Integration tests for vlora.pipeline."""
 
 import torch
-import pytest
 
 from vlora.io import LoRAWeights, save_adapter
 from vlora.pipeline import absorb_task, extract_adapter, init_subspace

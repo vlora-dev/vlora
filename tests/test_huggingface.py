@@ -1,13 +1,12 @@
 """Tests for vlora.integrations.huggingface — HF Trainer callback."""
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from vlora.io import LoRAWeights
 from vlora.subspace import SharedSubspace
 from vlora.training import orthogonal_init
-
 
 LAYERS = ["layer.0.q_proj", "layer.0.v_proj"]
 DIM = 32
@@ -56,7 +55,7 @@ class TestVLoRACallbackImport:
     def test_stub_raises_without_transformers(self):
         """If transformers not installed, instantiation raises ImportError."""
         try:
-            import transformers
+            import transformers  # noqa: F401
             pytest.skip("transformers is installed")
         except ImportError:
             from vlora.integrations.huggingface import VLoRACallback
@@ -81,8 +80,9 @@ class TestVLoRACallbackWithTransformers:
             pytest.skip("transformers + accelerate not installed")
 
     def test_callback_creates_trainer_on_begin(self):
+        from transformers import TrainerControl, TrainerState, TrainingArguments
+
         from vlora.integrations.huggingface import VLoRACallback
-        from transformers import TrainerState, TrainerControl, TrainingArguments
 
         sub = _make_subspace()
         orthogonal_init(sub, "test_task")
@@ -99,8 +99,9 @@ class TestVLoRACallbackWithTransformers:
         assert callback.trainer.num_trainable_params > 0
 
     def test_callback_write_back_on_end(self):
+        from transformers import TrainerControl, TrainerState, TrainingArguments
+
         from vlora.integrations.huggingface import VLoRACallback
-        from transformers import TrainerState, TrainerControl, TrainingArguments
 
         sub = _make_subspace()
         orthogonal_init(sub, "test_task")
@@ -116,8 +117,9 @@ class TestVLoRACallbackWithTransformers:
         assert "test_task" in sub.tasks
 
     def test_callback_logs_metrics(self):
+        from transformers import TrainerControl, TrainerState, TrainingArguments
+
         from vlora.integrations.huggingface import VLoRACallback
-        from transformers import TrainerState, TrainerControl, TrainingArguments
 
         sub = _make_subspace()
         orthogonal_init(sub, "test_task")
@@ -143,8 +145,9 @@ class TestVLoRACallbackWithTransformers:
         differentiable hooks so the Trainer's backward pass produces
         gradients on loadings, and on_step_end steps the optimizer.
         """
+        from transformers import TrainerControl, TrainerState, TrainingArguments
+
         from vlora.integrations.huggingface import VLoRACallback
-        from transformers import TrainerState, TrainerControl, TrainingArguments
 
         sub = _make_subspace()
         orthogonal_init(sub, "test_task")

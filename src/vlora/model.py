@@ -80,6 +80,9 @@ class VLoRAModel(nn.Module):
         self._active_task: str | None = None
         self._cached_deltas: dict[str, Tensor] | None = None
         self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._merged: bool = False
+        self._merge_deltas: dict[str, Tensor] | None = None
+        self._merged_task_id: str | None = None
         # Cache module handles once to avoid O(M) scan on every task switch
         self._target_modules: dict[str, nn.Module] = {
             name: module
@@ -90,6 +93,10 @@ class VLoRAModel(nn.Module):
 
     def set_task(self, task_id: str) -> None:
         """Set the active task adapter. Reconstructs and caches if changed."""
+        if self._merged:
+            raise RuntimeError(
+                "Cannot switch tasks while merged. Call unmerge() first."
+            )
         if task_id == self._active_task:
             return
 
@@ -108,6 +115,10 @@ class VLoRAModel(nn.Module):
 
     def clear_task(self) -> None:
         """Remove the active task adapter."""
+        if self._merged:
+            raise RuntimeError(
+                "Cannot clear task while merged. Call unmerge() first."
+            )
         self._remove_hooks()
         self._active_task = None
         self._cached_deltas = None
@@ -215,6 +226,91 @@ class VLoRAModel(nn.Module):
         - ``num_target_layers``: subspace layers matched in the base model
         """
         return dict(self._qlora_info)
+
+    def merge(self, task_id: str | None = None) -> None:
+        """Bake LoRA deltas into base model weights for hook-free inference.
+
+        After merging, the model runs without hooks — the adapter effect
+        is permanent in ``weight.data`` until ``unmerge()`` is called.
+        This eliminates per-layer hook overhead for serving a single adapter.
+
+        Args:
+            task_id: Task to merge. Uses the active task if None.
+
+        Raises:
+            RuntimeError: If the model is already merged, or if the base
+                model has quantized layers (cannot modify quantized weights).
+            ValueError: If no task is specified and no task is active.
+        """
+        if self._merged:
+            raise RuntimeError(
+                "Model is already merged. Call unmerge() first."
+            )
+        if self._qlora_info["quantized"]:
+            raise RuntimeError(
+                "Cannot merge into quantized base model weights. "
+                "Use hook-based inference with set_task() instead."
+            )
+
+        tid = task_id or self._active_task
+        if tid is None:
+            raise ValueError(
+                "No task to merge. Pass task_id or call set_task() first."
+            )
+        check_task_exists(self.subspace, tid)
+
+        # Compute deltas (reuse cache if available for this task)
+        if self._cached_deltas is not None and self._active_task == tid:
+            deltas = self._cached_deltas
+        else:
+            deltas = self.reconstruct_state_dict(tid)
+
+        # Bake deltas into base model weights
+        with torch.no_grad():
+            for name, module in self._target_modules.items():
+                if name in deltas:
+                    delta = deltas[name]
+                    module.weight.data += (
+                        self.scaling * delta
+                    ).to(module.weight.device, module.weight.dtype)
+
+        # Cache deltas for unmerge and clean up hooks
+        self._merge_deltas = {
+            name: delta.clone() for name, delta in deltas.items()
+        }
+        self._remove_hooks()
+        self._merged = True
+        self._merged_task_id = tid
+        self._active_task = tid
+        self._cached_deltas = None
+
+    def unmerge(self) -> None:
+        """Reverse a previous ``merge()``, restoring original base weights.
+
+        Raises:
+            RuntimeError: If the model is not currently merged.
+        """
+        if not self._merged:
+            raise RuntimeError("Model is not merged. Nothing to unmerge.")
+
+        assert self._merge_deltas is not None  # guaranteed by _merged check
+        with torch.no_grad():
+            for name, module in self._target_modules.items():
+                if name in self._merge_deltas:
+                    delta = self._merge_deltas[name]
+                    module.weight.data -= (
+                        self.scaling * delta
+                    ).to(module.weight.device, module.weight.dtype)
+
+        self._merged = False
+        self._merge_deltas = None
+        self._merged_task_id = None
+        self._active_task = None
+
+    @property
+    def is_merged(self) -> bool:
+        """Whether LoRA deltas are currently baked into base weights."""
+        return self._merged
 
     def compile(self, **kwargs) -> VLoRAModel:
         """Compile the base model with torch.compile for faster inference.

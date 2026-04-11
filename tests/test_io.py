@@ -1,11 +1,9 @@
 """Tests for vlora.io — adapter parsing and I/O."""
 
 import json
-import tempfile
-from pathlib import Path
 
-import torch
 import pytest
+import torch
 from safetensors.torch import save_file
 
 from vlora.io import LoRAWeights, load_adapter, parse_state_dict, save_adapter, stack_lora_weights

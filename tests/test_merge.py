@@ -1,10 +1,10 @@
 """Tests for vlora.merge — adapter merging techniques."""
 
-import torch
 import pytest
+import torch
 
 from vlora.io import LoRAWeights
-from vlora.merge import task_arithmetic, ties_merge, dare_merge, MERGE_METHODS
+from vlora.merge import MERGE_METHODS, dare_merge, task_arithmetic, ties_merge
 
 
 def _make_adapters(n=3, layers=None, rank=4, dim=32):

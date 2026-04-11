@@ -1,16 +1,16 @@
 """Tests for vlora.analysis — adapter analysis functions."""
 
-import torch
 import pytest
+import torch
 
-from vlora.io import LoRAWeights
-from vlora.subspace import SharedSubspace
 from vlora.analysis import (
+    adapter_diff,
     compute_similarity_matrix,
     find_clusters,
-    adapter_diff,
     subspace_coverage,
 )
+from vlora.io import LoRAWeights
+from vlora.subspace import SharedSubspace
 
 
 def _make_adapters(n=5, layers=None, rank=4, dim=64):

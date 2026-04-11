@@ -239,7 +239,7 @@ def select_num_components(singular_values: Tensor, threshold: float = 0.6) -> in
     above = (cumulative >= threshold).nonzero(as_tuple=True)[0]
     if len(above) == 0:
         return len(singular_values)
-    return above[0].item() + 1
+    return above[0].item() + 1  # type: ignore[no-any-return]
 
 
 def nf4_quantize_dequantize(
@@ -389,7 +389,6 @@ def nf4_unpack(packed: Tensor, scales: Tensor, numel: int, block_size: int = 64)
     values = table[indices]
 
     # Reshape into blocks and multiply by scales
-    n_padded = len(values)
     blocks = values.reshape(-1, block_size)
     dequantized = blocks * scales.unsqueeze(1)
 

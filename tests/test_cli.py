@@ -1,16 +1,12 @@
 """Tests for vlora.cli — command-line interface."""
 
-import json
-import tempfile
 from pathlib import Path
 
 import torch
-import pytest
 from click.testing import CliRunner
 
 from vlora.cli import cli
 from vlora.io import LoRAWeights, save_adapter
-from vlora.subspace import SharedSubspace
 
 
 def _make_adapter_dir(tmp_path: Path, name: str, layers=None, rank=4, dim=64) -> Path:

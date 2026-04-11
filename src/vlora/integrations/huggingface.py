@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -101,6 +100,7 @@ if HAS_TRANSFORMERS:
             The reconstruction is differentiable — gradients flow from the
             loss through the hook back to the loadings parameters.
             """
+            assert self._trainer is not None
             params = self._trainer.params
             la = params[f"{layer_name}.loadings_a"]
             lb = params[f"{layer_name}.loadings_b"]

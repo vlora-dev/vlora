@@ -1,10 +1,8 @@
 """Tests for vlora.subspace — SharedSubspace core class."""
 
-import tempfile
-from pathlib import Path
 
-import torch
 import pytest
+import torch
 
 from vlora.io import LoRAWeights
 from vlora.subspace import SharedSubspace, TaskProjection

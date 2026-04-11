@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.0] - 2026-04-11
+
+### Added
+- **`VLoRAModel.merge()` / `unmerge()`** — bake LoRA deltas into base model weights for hook-free inference. `is_merged` property tracks state. Errors on quantized base models.
+- **Quality warning in `project()`** — optional `warn_threshold` parameter warns when subspace coverage is low, suggesting `absorb()` to expand the basis.
+- **PEP 561 `py.typed` marker** — enables type checker support for downstream users.
+- **CI hardening** — ruff lint + format check, mypy type checking, pytest-cov with 80% coverage floor, Python 3.12 added to test matrix.
+- **Edge case and numerical precision tests** — rank-1 adapters, single-layer adapters, project→reconstruct roundtrip bounds, save→load serialization verification.
+
+### Changed
+- **API surface reduced** — low-level ops (`compute_svd`, `project_onto_subspace`, `gram_schmidt`, NF4 functions, `incremental_svd_update`, etc.) removed from top-level `vlora` namespace. Still accessible via `from vlora.ops import ...`.
+- **Development status** — classifier updated from "Alpha" to "Production/Stable".
+
+### Migration from 0.3.0
+Replace `from vlora import compute_svd` with `from vlora.ops import compute_svd` (and similarly for `project_onto_subspace`, `reconstruct_from_subspace`, `gram_schmidt`, `explained_variance_ratio`, `select_num_components`, `incremental_svd_update`, `NF4_QUANT_TABLE`, `nf4_quantize_dequantize`, `nf4_pack`, `nf4_unpack`). No other breaking changes.
+
 ## [0.3.0] - 2026-03-30
 
 ### Added

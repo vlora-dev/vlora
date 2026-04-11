@@ -1,8 +1,8 @@
 """Tests for vlora.model — VLoRAModel inference wrapper."""
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from vlora.io import LoRAWeights
 from vlora.model import VLoRAModel
@@ -197,6 +197,146 @@ class TestVLoRAModel:
         sub, base_model, _ = _make_adapters_and_model(dim=64)
         model = VLoRAModel(base_model, sub, compute_dtype=torch.bfloat16)
         model.set_task("task_0")
+        x = torch.randn(2, 64)
+        out = model(x)
+        assert out.shape == (2, 64)
+
+
+class TestMergeUnmerge:
+    def test_merge_output_matches_hooks(self):
+        """Core correctness: merged forward == hook-based forward."""
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        x = torch.randn(2, 64)
+
+        # Get hook-based output
+        model = VLoRAModel(base_model, sub)
+        model.set_task("task_0")
+        out_hooks = model(x).detach().clone()
+        model.clear_task()
+
+        # Get merge-based output
+        model.merge(task_id="task_0")
+        out_merge = model(x).detach().clone()
+
+        torch.testing.assert_close(out_hooks, out_merge, atol=1e-5, rtol=1e-5)
+
+    def test_merge_changes_weights(self):
+        sub, base_model, layers = _make_adapters_and_model(dim=64)
+        model = VLoRAModel(base_model, sub)
+
+        original_weights = {
+            name: module.weight.data.clone()
+            for name, module in model._target_modules.items()
+        }
+
+        model.merge(task_id="task_0")
+
+        for name, module in model._target_modules.items():
+            assert not torch.allclose(
+                original_weights[name], module.weight.data, atol=1e-8
+            ), f"Weight {name} should have changed after merge"
+
+    def test_unmerge_restores_weights(self):
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        model = VLoRAModel(base_model, sub)
+
+        original_weights = {
+            name: module.weight.data.clone()
+            for name, module in model._target_modules.items()
+        }
+
+        model.merge(task_id="task_0")
+        model.unmerge()
+
+        for name, module in model._target_modules.items():
+            torch.testing.assert_close(
+                original_weights[name], module.weight.data, atol=1e-6, rtol=1e-6
+            )
+
+    def test_merge_then_set_task_raises(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        model.merge(task_id="task_0")
+        with pytest.raises(RuntimeError, match="Cannot switch tasks while merged"):
+            model.set_task("task_1")
+
+    def test_merge_then_clear_task_raises(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        model.merge(task_id="task_0")
+        with pytest.raises(RuntimeError, match="Cannot clear task while merged"):
+            model.clear_task()
+
+    def test_merge_twice_raises(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        model.merge(task_id="task_0")
+        with pytest.raises(RuntimeError, match="already merged"):
+            model.merge(task_id="task_1")
+
+    def test_unmerge_without_merge_raises(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        with pytest.raises(RuntimeError, match="not merged"):
+            model.unmerge()
+
+    def test_merge_with_explicit_task_id(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        # No set_task call — pass task_id directly
+        model.merge(task_id="task_1")
+        assert model.is_merged
+        assert model.active_task == "task_1"
+
+    def test_merge_no_task_raises(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        with pytest.raises(ValueError, match="No task to merge"):
+            model.merge()
+
+    def test_is_merged_property(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        assert not model.is_merged
+        model.merge(task_id="task_0")
+        assert model.is_merged
+        model.unmerge()
+        assert not model.is_merged
+
+    def test_merge_uses_active_task(self):
+        sub, base_model, _ = _make_adapters_and_model()
+        model = VLoRAModel(base_model, sub)
+        model.set_task("task_1")
+        model.merge()
+        assert model.is_merged
+        assert model.active_task == "task_1"
+
+    def test_merge_with_scaling(self):
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        x = torch.randn(2, 64)
+
+        # scaling=2.0
+        model = VLoRAModel(base_model, sub, scaling=2.0)
+        model.set_task("task_0")
+        out_hooks = model(x).detach().clone()
+        model.clear_task()
+
+        model.merge(task_id="task_0")
+        out_merge = model(x).detach().clone()
+
+        # Slightly higher tolerance: hook path applies delta via x @ delta.T
+        # while merge path folds delta into weight, so matmul order differs.
+        torch.testing.assert_close(out_hooks, out_merge, atol=5e-4, rtol=5e-4)
+
+    def test_unmerge_then_set_task_works(self):
+        sub, base_model, _ = _make_adapters_and_model(dim=64)
+        model = VLoRAModel(base_model, sub)
+
+        model.merge(task_id="task_0")
+        model.unmerge()
+
+        # Should work normally after unmerge
+        model.set_task("task_1")
         x = torch.randn(2, 64)
         out = model(x)
         assert out.shape == (2, 64)

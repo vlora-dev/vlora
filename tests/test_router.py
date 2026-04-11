@@ -1,11 +1,10 @@
 """Tests for vlora.router — task routing and adapter blending."""
 
 import torch
-import pytest
 
 from vlora.io import LoRAWeights
-from vlora.subspace import SharedSubspace
 from vlora.router import TaskRouter
+from vlora.subspace import SharedSubspace
 
 
 def _make_adapters(n=3, layers=None, rank=4, dim=64):

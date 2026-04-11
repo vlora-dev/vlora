@@ -6,6 +6,12 @@
   <strong>Various LoRA adapters. One shared basis.</strong>
 </p>
 
+<p align="center">
+  <a href="https://github.com/vlora-dev/vlora/actions/workflows/ci.yml"><img src="https://github.com/vlora-dev/vlora/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/vlora-dev/"><img src="https://img.shields.io/pypi/v/vlora-dev" alt="PyPI"></a>
+  <a href="https://pypi.org/project/vlora-dev/"><img src="https://img.shields.io/pypi/pyversions/vlora-dev" alt="Python"></a>
+</p>
+
 Your adapters share more structure than you think. vLoRA finds the common basis and stores each adapter as a tiny coefficient vector — up to 122× compression at scale. Based on the [Share paper](https://arxiv.org/abs/2602.06043).
 
 ## Install
@@ -99,6 +105,19 @@ model.set_task("task_1")  # cached if same task
 output = model(input_ids)
 
 print(model.available_tasks)  # ["task_0", "task_1", ...]
+```
+
+### Merging into Base Weights
+
+For deployment with a single adapter, bake deltas directly into the base model — zero hook overhead:
+
+```python
+model = VLoRAModel(base_model, subspace)
+model.merge(task_id="task_0")  # deltas baked into weights
+output = model(input_ids)       # pure base model forward, no hooks
+
+model.unmerge()                 # restore original weights
+model.set_task("task_1")        # back to hook-based inference
 ```
 
 ## QLoRA Support
@@ -444,6 +463,22 @@ subspace.save("updated_subspace/")
   archivePrefix={arXiv},
 }
 ```
+
+## Migrating from v0.x
+
+Low-level math operations have been moved from the top-level `vlora` namespace to `vlora.ops`:
+
+```python
+# Before (v0.x)
+from vlora import compute_svd, gram_schmidt, nf4_pack
+
+# After (v1.0)
+from vlora.ops import compute_svd, gram_schmidt, nf4_pack
+```
+
+Moved symbols: `compute_svd`, `project_onto_subspace`, `reconstruct_from_subspace`, `gram_schmidt`, `explained_variance_ratio`, `select_num_components`, `incremental_svd_update`, `NF4_QUANT_TABLE`, `nf4_quantize_dequantize`, `nf4_pack`, `nf4_unpack`.
+
+All other public APIs remain unchanged.
 
 ## License
 

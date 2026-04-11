@@ -9,7 +9,7 @@ from pathlib import Path
 
 import click
 
-from vlora.io import LoRAWeights, load_adapter, save_adapter
+from vlora.io import load_adapter, save_adapter
 from vlora.ops import explained_variance_ratio
 from vlora.subspace import SharedSubspace
 
@@ -65,7 +65,7 @@ def info(subspace_path: str, as_json: bool):
     click.echo(f"  Tasks: {len(sub.tasks)}")
 
     if sub.tasks:
-        click.echo(f"\n  Task IDs:")
+        click.echo("\n  Task IDs:")
         for tid in sorted(sub.tasks.keys()):
             click.echo(f"    - {tid}")
 
@@ -102,7 +102,7 @@ def compress(adapter_dirs: tuple[str, ...], output: str, num_components: int | N
         task_ids.append(path.name)
         click.echo(f"    Loaded: {path.name}")
 
-    click.echo(f"  Building subspace...")
+    click.echo("  Building subspace...")
     sub = SharedSubspace.from_adapters(
         adapters,
         task_ids=task_ids,
@@ -210,7 +210,7 @@ def analyze(adapter_dirs: tuple[str, ...], threshold: float, as_json: bool):
     for n in names:
         click.echo(f"    Loaded: {n}")
 
-    click.echo(f"\n  Pairwise Cosine Similarity:")
+    click.echo("\n  Pairwise Cosine Similarity:")
     header = "  " + " " * 20 + "  ".join(f"{n[:8]:>8}" for n in names)
     click.echo(header)
     for i, name in enumerate(names):
@@ -242,7 +242,7 @@ def validate(subspace_path: str):
     import torch
 
     sub = SharedSubspace.load(subspace_path)
-    issues = {"errors": [], "warnings": []}
+    issues: dict[str, list[str]] = {"errors": [], "warnings": []}
 
     click.echo(f"\n  Validating: {subspace_path}")
     click.echo(f"  Tasks: {len(sub.tasks)}, Layers: {len(sub.layer_names)}, k={sub.num_components}")
@@ -298,7 +298,7 @@ def validate(subspace_path: str):
         for warn in issues["warnings"]:
             click.echo(f"    [WARN]  {warn}")
     if not issues["errors"] and not issues["warnings"]:
-        click.echo(f"\n  All checks passed.")
+        click.echo("\n  All checks passed.")
 
     click.echo()
 
@@ -347,7 +347,6 @@ def diff(subspace_path: str, task_a: str, task_b: str):
 @click.argument("subspace_path", type=click.Path(exists=True))
 def benchmark(subspace_path: str):
     """Benchmark subspace operations: reconstruct, project, absorb."""
-    import torch
 
     sub = SharedSubspace.load(subspace_path)
     task_ids = sorted(sub.tasks.keys())
@@ -418,11 +417,11 @@ def merge(adapter_dirs: tuple[str, ...], output: str, method: str, weights: str 
 
     fn = MERGE_METHODS[method]
     if method == "ties":
-        merged = fn(adapters, density=density, weights=parsed_weights)
+        merged = fn(adapters, density=density, weights=parsed_weights)  # type: ignore[operator]
     elif method == "dare":
-        merged = fn(adapters, drop_rate=drop_rate, weights=parsed_weights, seed=seed)
+        merged = fn(adapters, drop_rate=drop_rate, weights=parsed_weights, seed=seed)  # type: ignore[operator]
     else:
-        merged = fn(adapters, weights=parsed_weights)
+        merged = fn(adapters, weights=parsed_weights)  # type: ignore[operator]
 
     save_adapter(merged, output)
     click.echo(f"  Merged adapter saved to: {output}")

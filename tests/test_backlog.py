@@ -1,10 +1,9 @@
 """Tests for backlog features: outlier detection, torch.compile, etc."""
 
 import torch
-import pytest
 
-from vlora.io import LoRAWeights
 from vlora.analysis import find_outliers
+from vlora.io import LoRAWeights
 from vlora.model import VLoRAModel
 from vlora.subspace import SharedSubspace
 

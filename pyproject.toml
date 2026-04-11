@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vlora-dev"
-version = "0.3.0"
+version = "1.0.0"
 description = "Various LoRA adapters. One shared basis. Up to 122x compression at scale."
 readme = "README.md"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ requires-python = ">=3.9"
 authors = [{ name = "Tim Veseli" }]
 keywords = ["lora", "llm", "parameter-efficient", "fine-tuning", "subspace"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
@@ -35,14 +35,18 @@ hf = ["transformers>=4.38", "huggingface-hub>=0.20"]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.24"]
 dev = [
     "pytest>=7.0",
+    "pytest-cov>=4.0",
     "huggingface-hub>=0.20",
     "pre-commit>=3.0",
     "ruff>=0.8",
+    "mypy>=1.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/tveseli/vlora"
-Repository = "https://github.com/tveseli/vlora"
+Homepage = "https://github.com/vlora-dev/vlora"
+Repository = "https://github.com/vlora-dev/vlora"
+Changelog = "https://github.com/vlora-dev/vlora/blob/main/CHANGELOG.md"
+Issues = "https://github.com/vlora-dev/vlora/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vlora"]
@@ -56,9 +60,16 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+ignore = ["E501", "E741", "E402"]
 
 [tool.mypy]
 python_version = "3.9"
 ignore_missing_imports = true
 warn_return_any = true
 check_untyped_defs = true
+follow_imports = "skip"
+exclude = ["build/", "dist/"]
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "safetensors.*"]
+follow_imports = "skip"

@@ -1,7 +1,6 @@
 """Tests for vlora.ops — pure math operations."""
 
 import torch
-import pytest
 
 from vlora.ops import (
     NF4_QUANT_TABLE,

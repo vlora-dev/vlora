@@ -1,13 +1,10 @@
 """Tests for incremental SVD and streaming subspace construction."""
 
-import tempfile
-from pathlib import Path
 
 import torch
-import pytest
 
 from vlora.io import LoRAWeights, save_adapter
-from vlora.ops import incremental_svd_update, compute_svd
+from vlora.ops import compute_svd, incremental_svd_update
 from vlora.subspace import SharedSubspace
 
 
@@ -114,26 +111,21 @@ class TestAbsorbIncremental:
     def test_faster_than_full_absorb(self):
         """Incremental should not rebuild from scratch."""
         adapters, _ = _make_adapters(5)
-        sub = SharedSubspace.from_adapters(adapters, num_components=3)
+        SharedSubspace.from_adapters(adapters, num_components=3)
 
-        import time
         new = _make_adapters(1)[0][0]
 
-        # Time incremental
-        start = time.perf_counter()
+        # Run incremental
         sub_inc = SharedSubspace.from_adapters(adapters, num_components=3)
         sub_inc.absorb_incremental(new, "new")
-        inc_time = time.perf_counter() - start
 
-        # Time full absorb
-        start = time.perf_counter()
+        # Run full absorb
         sub_full = SharedSubspace.from_adapters(adapters, num_components=3)
         sub_full.absorb(new, "new")
-        full_time = time.perf_counter() - start
 
-        # Incremental should be faster (or at least not slower by 2x)
-        # With small test data, times are similar, so just check it completes
+        # Both should complete and have the new task
         assert "new" in sub_inc.tasks
+        assert "new" in sub_full.tasks
 
 
 class TestAbsorbIncrementalAccuracy:
@@ -202,7 +194,7 @@ class TestFromAdaptersStreaming:
             paths.append(p)
 
         sub = SharedSubspace.from_adapters_streaming(paths, num_components=2)
-        recon = sub.reconstruct(f"adapter_0")
+        recon = sub.reconstruct("adapter_0")
         for l in layers:
             assert recon.lora_a[l].shape == (4, 64)
 

@@ -8,7 +8,7 @@ Step 3: absorb         — incorporate new adapter, recompute basis
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +27,6 @@ from vlora._validate import (
 from vlora.io import LoRAWeights, stack_lora_weights
 from vlora.ops import (
     compute_svd,
-    explained_variance_ratio,
     gram_schmidt,
     incremental_svd_update,
     nf4_pack,
@@ -249,8 +248,21 @@ class SharedSubspace:
             variance_threshold=variance_threshold,
         )
 
-    def project(self, adapter: LoRAWeights, task_id: str) -> TaskProjection:
-        """Step 2a: Project a new adapter onto the existing basis."""
+    def project(
+        self,
+        adapter: LoRAWeights,
+        task_id: str,
+        warn_threshold: float | None = None,
+    ) -> TaskProjection:
+        """Step 2a: Project a new adapter onto the existing basis.
+
+        Args:
+            adapter: LoRA adapter to project.
+            task_id: Name for this task.
+            warn_threshold: If set, warn when mean subspace coverage falls
+                below this value (0.0–1.0). Useful for detecting adapters
+                that are poorly represented by the current basis.
+        """
         check_adapter_matches_subspace(adapter, self, "project")
         loadings_a: dict[str, Tensor] = {}
         loadings_b: dict[str, Tensor] = {}
@@ -260,6 +272,34 @@ class SharedSubspace:
             wb = adapter.lora_b[layer].flatten() - self.means_b[layer]
             loadings_a[layer] = project_onto_subspace(wa, self.components_a[layer])
             loadings_b[layer] = project_onto_subspace(wb, self.components_b[layer])
+
+        if warn_threshold is not None:
+            total_coverage = 0.0
+            n_sides = 0
+            for layer in self.layer_names:
+                for centered, comps, loads in [
+                    (adapter.lora_a[layer].flatten() - self.means_a[layer],
+                     self.components_a[layer], loadings_a[layer]),
+                    (adapter.lora_b[layer].flatten() - self.means_b[layer],
+                     self.components_b[layer], loadings_b[layer]),
+                ]:
+                    orig_norm = centered.norm().item()
+                    if orig_norm < 1e-8:
+                        total_coverage += 1.0
+                    else:
+                        reconstructed = loads @ comps
+                        residual = (centered - reconstructed).norm().item()
+                        total_coverage += 1.0 - (residual / orig_norm)
+                    n_sides += 1
+            mean_coverage = total_coverage / n_sides if n_sides > 0 else 0.0
+            if mean_coverage < warn_threshold:
+                import warnings
+                warnings.warn(
+                    f"Low subspace coverage ({mean_coverage:.1%}) for adapter "
+                    f"'{task_id}'. Reconstruction quality may be poor. "
+                    f"Consider absorb() to expand the basis.",
+                    stacklevel=2,
+                )
 
         return TaskProjection(
             task_id=task_id, loadings_a=loadings_a, loadings_b=loadings_b
@@ -675,11 +715,11 @@ class SharedSubspace:
                 "quantized_bytes": base_quantized,
                 "compression_ratio": base_original / base_quantized if base_quantized > 0 else 0,
             }
-            result["total_original_bytes"] = base_original + result["adapter_bytes_original"]
-            result["total_compressed_bytes"] = base_quantized + result["adapter_bytes_compressed"]
-            result["total_compression_ratio"] = (
-                result["total_original_bytes"] / result["total_compressed_bytes"]
-                if result["total_compressed_bytes"] > 0 else 0
+            result["total_original_bytes"] = base_original + result["adapter_bytes_original"]  # type: ignore[assignment,operator]
+            result["total_compressed_bytes"] = base_quantized + result["adapter_bytes_compressed"]  # type: ignore[assignment,operator]
+            result["total_compression_ratio"] = (  # type: ignore[assignment,operator]
+                result["total_original_bytes"] / result["total_compressed_bytes"]  # type: ignore[operator,assignment]
+                if result["total_compressed_bytes"] > 0 else 0  # type: ignore[operator]
             )
 
         return result
@@ -958,7 +998,6 @@ class SharedSubspace:
                 # Determine original numel from shapes or num_components
                 if shapes_a_raw and side == "a":
                     shape = tuple(shapes_a_raw[layer])
-                    k = num_components
                     # Component shape is (k, flattened_dim) where flattened_dim = product(shape)
                     dim = shape[0] * shape[1]  # rank * in_features
                 elif shapes_b_raw and side == "b":

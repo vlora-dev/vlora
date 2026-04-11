@@ -1,7 +1,7 @@
 """Tests for vlora.training — subspace-constrained training."""
 
-import torch
 import pytest
+import torch
 
 from vlora.io import LoRAWeights
 from vlora.subspace import SharedSubspace

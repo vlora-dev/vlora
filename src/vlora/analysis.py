@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 from torch import Tensor
 
 from vlora.io import LoRAWeights
 from vlora.ops import project_onto_subspace
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vlora.subspace import SharedSubspace
